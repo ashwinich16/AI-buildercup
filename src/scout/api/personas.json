@@ -1,0 +1,26 @@
+[
+  {
+    "id": "meera",
+    "name": "Meera",
+    "description": "Blind since birth. Loves soft, comfortable things and avoids leather.",
+    "preferences": [
+      {"attribute": "material", "value": "leather", "polarity": "avoid", "source": "stated", "confidence": 1.0},
+      {"attribute": "feel", "value": "soft and comfortable", "polarity": "like", "source": "stated", "confidence": 1.0}
+    ]
+  },
+  {
+    "id": "arjun",
+    "name": "Arjun",
+    "description": "Low vision. Likes bold, bright colours and sporty styles.",
+    "preferences": [
+      {"attribute": "colour", "value": "bold and bright", "polarity": "like", "source": "stated", "confidence": 1.0},
+      {"attribute": "style", "value": "sporty", "polarity": "like", "source": "stated", "confidence": 1.0}
+    ]
+  },
+  {
+    "id": "guest",
+    "name": "New shopper",
+    "description": "No history yet. Scout learns your taste as you shop.",
+    "preferences": []
+  }
+]

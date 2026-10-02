@@ -1,0 +1,14 @@
+google-adk
+google-genai
+google-cloud-discoveryengine
+google-cloud-storage
+google-cloud-secret-manager
+google-cloud-texttospeech
+cloud-sql-python-connector[pg8000]
+pydantic
+requests
+fastapi
+uvicorn[standard]
+python-dotenv
+# only needed when SCOUT_AUTH_MODE=firebase
+firebase-admin

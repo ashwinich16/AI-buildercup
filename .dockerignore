@@ -1,0 +1,10 @@
+.env
+.venv
+**/__pycache__
+**/.adk
+frontend/node_modules
+frontend/dist
+pipeline
+playground
+scripts
+"Claude outputs"
