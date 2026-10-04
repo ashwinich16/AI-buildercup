@@ -578,6 +578,40 @@ select {
 .product__meta {
   font-size: 0.9rem;
 }
+.evidence {
+  margin: 4px 0 2px;
+  padding: 8px 10px;
+  border-left: 3px solid var(--accent);
+  border-radius: 6px;
+  background: var(--surface-2);
+}
+.evidence__title {
+  margin: 0 0 4px;
+  font-size: 0.75rem;
+  font-weight: 600;
+  color: var(--muted);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+.evidence__list {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  display: grid;
+  gap: 4px;
+}
+.evidence__item {
+  font-size: 0.85rem;
+  line-height: 1.35;
+}
+.evidence__count {
+  color: var(--muted);
+  white-space: nowrap;
+}
+.evidence__flag {
+  font-weight: 600;
+  color: var(--badge-ink);
+}
 .product__actions {
   display: flex;
   flex-wrap: wrap;

@@ -18,6 +18,7 @@ CATALOG_OVERVIEW = "catalog_overview"  # text summary of what the catalog has cl
 SHORTLIST = "shortlist"              # products found by Retrieval (list of Product dicts)
 EXACT_MATCHES = "exact_matches"      # ids in the shortlist that match everything asked for
 RELAXED = "relaxed"                  # what Retrieval had to relax, e.g. ["details"]
+OTHER_TYPES = "other_types"          # other kinds in stock for the same person, offered when few matched
 PRESENTED = "presented"              # ids of the products spoken this time, in spoken order
 SEEN = "seen"                        # ids of every product presented for the current need
 FOCUS_PRODUCT = "focus_product"      # id of the product currently being discussed

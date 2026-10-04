@@ -5,7 +5,7 @@ function statusText({ voiceInput, speaking, busy, paused }) {
   if (voiceInput.blocked) return "Microphone access is blocked. Allow it in the browser to talk, or type below.";
   if (!voiceInput.active) return "Not listening. Press Start talking when you're ready.";
   if (busy) return "Thinking…";
-  if (speaking) return "Scout is speaking. Just start talking to interrupt.";
+  if (speaking) return "Scout is speaking. Talk over it to interrupt, or press Escape.";
   if (paused) return "Paused. I'm still listening whenever you're ready.";
   if (!voiceInput.hearing) return "Starting the microphone…";
   return "Listening. Go ahead.";

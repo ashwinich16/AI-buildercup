@@ -114,7 +114,8 @@ class ScoutOrchestrator(BaseAgent):
         if turn.intent == "reject":
             yield self._evidence("rejected", self._presented_product(ctx, turn.product_position), turn.reason)
         if turn.intent in ("shop", "reject") and turn.ready_to_search:
-            steps = self._search_and_narrate(ctx)
+            # After a rejection, only options they have not heard yet: repeating them is not "better options".
+            steps = self._search_and_narrate(ctx, skip_seen=turn.intent == "reject")
         elif turn.question:
             steps = self._just_say(ctx, turn.question)
         elif turn.intent == "more_options":
@@ -140,19 +141,32 @@ class ScoutOrchestrator(BaseAgent):
     # Steps
     # -----------------------------------------------------------------
 
-    async def _search_and_narrate(self, ctx: InvocationContext):
-        need = ShoppingNeed.model_validate(ctx.session.state.get(state_keys.NEED) or {})
-        result = await asyncio.to_thread(self.retriever.find, need)
+    async def _search_and_narrate(self, ctx: InvocationContext, skip_seen: bool = False):
+        state = ctx.session.state
+        need = ShoppingNeed.model_validate(state.get(state_keys.NEED) or {})
+        seen = set(state.get(state_keys.SEEN) or []) if skip_seen else set()
+        result = await asyncio.to_thread(self.retriever.find, need, seen)
         logger.info("Retrieval for %r found %d (%d exact, relaxed: %s)", result.query_text,
                     len(result.products), len(result.exact_ids), result.relaxed)
+
+        # They rejected everything that really fits (e.g. every black pair): say so honestly, keep what they heard,
+        # rather than quietly offering things that miss what they asked for.
+        nothing_new_fits = bool(need.must_have) and result.found and not result.exact_ids
+        if seen and (not result.found or nothing_new_fits):
+            yield self._update_state(ctx, {state_keys.OTHER_TYPES: result.other_types,
+                                           state_keys.NARRATION_TASK: NarrationTask.NO_MORE_OPTIONS.value})
+            async for event in self.narration.run_async(ctx):
+                yield event
+            return
 
         first = [p.id for p in result.products[:PRODUCTS_TO_PRESENT]]
         yield self._update_state(ctx, {         # save results first, so Narration reads them
             state_keys.SHORTLIST: [p.model_dump() for p in result.products],
             state_keys.EXACT_MATCHES: result.exact_ids,
             state_keys.RELAXED: result.relaxed,
+            state_keys.OTHER_TYPES: result.other_types,
             state_keys.PRESENTED: first,
-            state_keys.SEEN: first,
+            state_keys.SEEN: sorted(seen) + first,
             state_keys.NARRATION_TASK: NarrationTask.PRESENT_OPTIONS.value,
             state_keys.FOCUS_PRODUCT: None,
         })
@@ -182,6 +196,7 @@ class ScoutOrchestrator(BaseAgent):
                 delta[state_keys.EXACT_MATCHES] = list(state.get(state_keys.EXACT_MATCHES) or []) + extra.exact_ids
                 if extra.relaxed:
                     delta[state_keys.RELAXED] = extra.relaxed
+            delta[state_keys.OTHER_TYPES] = extra.other_types
 
         next_ids = [p.get("id") for p in unseen[:PRODUCTS_TO_PRESENT]]
         if next_ids:
@@ -305,7 +320,8 @@ class ScoutOrchestrator(BaseAgent):
             return None
         try:   # helpful, not essential: a failed search must never break the conversation
             # No category filter: if the shopper switches category mid-way, their words lead the search.
-            overview = await asyncio.to_thread(self.overview_builder.build, text)
+            # Gender is kept once said, so the kinds Scout offers are ones it has for that person.
+            overview = await asyncio.to_thread(self.overview_builder.build, text, None, need.gender_filter())
             return overview.to_prompt_text()
         except Exception as error:
             logger.warning("Catalog overview skipped: %s", error)

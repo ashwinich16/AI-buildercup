@@ -4,7 +4,9 @@ close to what the shopper is asking for.
 
 The Elicitation agent uses it so its questions always lead to products that
 exist ("soft ballet flats or cushioned loafers?" only if both are in stock),
-and to guess the category from the shopper's own words.
+and to guess the category from the shopper's own words. It also shows who the
+matches are made for and which kinds they are, so Scout knows when "men's or
+women's?" or "a shirt or a t-shirt?" would really change what it shows.
 
 Scales with catalog size: it summarises the top-N search results (an index
 lookup, roughly constant time), never the whole catalog. For very large
@@ -26,6 +28,8 @@ _MAX_VALUE_CHARS = 40   # skip long sentence-style values; they do not summarise
 class CatalogOverview(BaseModel):
     sample_size: int = 0
     categories: dict[str, int] = Field(default_factory=dict)          # category -> count in sample
+    kinds: dict[str, dict[str, int]] = Field(default_factory=dict)    # category -> {product type -> count}
+    genders: dict[str, int] = Field(default_factory=dict)             # men / women / unisex -> count
     price_min: Optional[float] = None
     price_max: Optional[float] = None
     common_attributes: dict[str, list[str]] = Field(default_factory=dict)  # e.g. color -> [black, tan]
@@ -37,6 +41,10 @@ class CatalogOverview(BaseModel):
             return "No close matches found in the catalog."
         lines = [f"Closest {self.sample_size} products in the catalog:"]
         lines.append("Categories: " + ", ".join(f"{c} ({n})" for c, n in self.categories.items()))
+        for category, kinds in self.kinds.items():
+            lines.append(f"Kinds of {category}: " + ", ".join(f"{k} ({n})" for k, n in kinds.items()))
+        if self.genders:
+            lines.append("Made for: " + ", ".join(f"{g} ({n})" for g, n in self.genders.items()))
         if self.price_min is not None:
             lines.append(f"Prices: ${self.price_min:.0f} to ${self.price_max:.0f}")
         for name, values in self.common_attributes.items():
@@ -57,8 +65,9 @@ class CatalogOverviewBuilder:
         self._max_attributes = max_attributes
         self._max_examples = max_examples
 
-    def build(self, text: str, category: Optional[str] = None) -> CatalogOverview:
-        products = self._catalog.search(SearchQuery(text=text, category=category, limit=self._sample_size))
+    def build(self, text: str, category: Optional[str] = None, gender: Optional[str] = None) -> CatalogOverview:
+        products = self._catalog.search(SearchQuery(text=text, category=category, gender=gender,
+                                                    limit=self._sample_size))
         if not products:
             return CatalogOverview()
 
@@ -66,6 +75,8 @@ class CatalogOverviewBuilder:
         return CatalogOverview(
             sample_size=len(products),
             categories=dict(Counter(p.category for p in products if p.category).most_common()),
+            kinds=self._kinds(products),
+            genders=dict(Counter(p.gender for p in products if p.gender).most_common()),
             price_min=min(prices) if prices else None,
             price_max=max(prices) if prices else None,
             common_attributes=self._common_attributes(products),
@@ -85,6 +96,14 @@ class CatalogOverviewBuilder:
         names = sorted(values_by_name, key=lambda n: len(values_by_name[n]), reverse=True)
         return {name: self._top(values_by_name[name], self._values_per_attribute)
                 for name in names[: self._max_attributes] if len(values_by_name[name]) >= 2}
+
+    @staticmethod
+    def _kinds(products: list[Product]) -> dict[str, dict[str, int]]:
+        by_category: dict[str, Counter] = {}
+        for product in products:
+            if product.category and product.product_type:
+                by_category.setdefault(product.category, Counter())[product.product_type] += 1
+        return {category: dict(counts.most_common()) for category, counts in by_category.items()}
 
     @staticmethod
     def _top(values: list[str], n: int) -> list[str]:

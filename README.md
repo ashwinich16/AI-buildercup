@@ -141,14 +141,23 @@ On Windows PowerShell run `$env:PYTHONPATH="src"` once in the terminal, then the
 Run once (or whenever the catalog changes). All settings come from `.env`.
 
 ```bash
-python pipeline/enrich.py     # Gemini reads photos, descriptions and reviews -> product_intelligence in Cloud SQL
-python pipeline/export.py     # Cloud SQL -> JSONL in gs://$SCOUT_EXPORT_BUCKET/$SCOUT_EXPORT_OBJECT
+python pipeline/ingestion.py        # Amazon Reviews 2023 -> curated products, images, reviews in Cloud SQL
+python pipeline/gender.py           # who each product is for: men / women / unisex
+python pipeline/product_type.py     # the kind within each category (shirt, t-shirt, polo...); flags misfiled items
+python pipeline/enrich.py           # Gemini reads photos, descriptions and reviews -> product_intelligence
+python pipeline/review_evidence.py  # backs each review point with word-for-word quotes and real counts
+python pipeline/export.py           # Cloud SQL -> JSONL in gs://$SCOUT_EXPORT_BUCKET/$SCOUT_EXPORT_OBJECT
+python scripts/check_catalog.py     # products, images, reviews and enrichment per category
 ```
+
+Every step only processes products it has not done yet, so re-running is safe. Products that do
+not belong in the shop can be left out without deleting them:
+`UPDATE product SET excluded_reason = 'why' WHERE product_id = '...';` (export.py skips them).
 
 Then import the JSONL into Vertex AI Search: Console → AI Applications → Data Stores → your
 structured data store → Import → Cloud Storage → the exported file (choose a full/replace import
-when re-importing). Make sure `title` and `search_text` are searchable, and `category` and `price`
-are filterable, in the data store schema.
+when re-importing). Make sure `title` and `search_text` are searchable, and `category`,
+`product_type`, `gender` and `price` are filterable (indexable), in the data store schema.
 
 `enrich.py` only processes products that have no `product_intelligence` row yet; to redo everything,
 run `DELETE FROM product_intelligence;` first.

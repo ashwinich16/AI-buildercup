@@ -4,6 +4,7 @@ Scout web API (FastAPI). Serves the React app and these endpoints:
   GET  /api/auth-config     how the frontend signs in (demo personas or Firebase settings)
   POST /api/sessions        start a conversation; returns Scout's opening words
   POST /api/chat            send a message; get Scout's reply + what to show
+  POST /api/chat/stream     the same, streamed as Scout writes it (newline-delimited JSON)
   GET  /api/screen          current products and cart (e.g. after a reload)
   POST /api/speech          Scout's reply as natural speech (MP3)
 
@@ -16,10 +17,13 @@ Run locally (from the repository root):
 """
 
 import asyncio
+import json
 import logging
+from contextlib import asynccontextmanager
 from pathlib import Path
 
 from fastapi import Depends, FastAPI, HTTPException, Request, Response
+from fastapi.responses import StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
@@ -28,7 +32,9 @@ from scout.api.chat_service import ChatTurn, ScoutChatService, ScreenState, Star
 from scout.api.personas import load_personas
 from scout.api.shopper_repository import build_shopper_repository
 from scout.api.speech import SpeechSynthesizer
-from scout.app import build_root_agent
+from scout.api.warmup import keep_warm
+from scout.app import build_catalog, build_root_agent
+from scout.catalog import SearchQuery
 from scout.config import Settings, get_settings
 
 logging.basicConfig(level=logging.INFO)
@@ -59,12 +65,25 @@ def build_authenticator(settings: Settings) -> Authenticator:
 
 def create_app(settings: Settings | None = None) -> FastAPI:
     settings = settings or get_settings()
-    chat = ScoutChatService(build_root_agent(settings), build_shopper_repository(settings))
+    catalog = build_catalog(settings)
+    root = build_root_agent(settings, catalog)
+    chat = ScoutChatService(root, build_shopper_repository(settings))
     auth = build_authenticator(settings)
     speech = SpeechSynthesizer(settings.tts_voice)
     personas = load_personas()
 
-    app = FastAPI(title="Scout", description="Voice-first shopping companion")
+    # Warm every cloud connection at start-up and keep it warm, so no shopper waits for a cold start.
+    warm_calls = [catalog.categories, catalog.product_types,
+                  lambda: catalog.search(SearchQuery(text="jeans", limit=1)),
+                  lambda: speech.synthesize("Hi")]
+
+    @asynccontextmanager
+    async def lifespan(_: FastAPI):
+        task = asyncio.create_task(keep_warm(root, warm_calls))
+        yield
+        task.cancel()
+
+    app = FastAPI(title="Scout", description="Voice-first shopping companion", lifespan=lifespan)
 
     async def current_shopper(request: Request) -> Shopper:
         return await auth.shopper(request)
@@ -93,6 +112,20 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             raise HTTPException(status_code=404, detail="Conversation not found. Please start again.")
         except ValueError as error:          # ADK raises this for an unknown session
             raise HTTPException(status_code=404, detail=str(error))
+
+    @app.post("/api/chat/stream")
+    async def stream_message(body: ChatRequest, shopper: Shopper = Depends(current_shopper)) -> StreamingResponse:
+        await chat.screen(shopper.id, body.session_id)   # 404 before streaming starts, not halfway through
+
+        async def lines():
+            try:
+                async for item in chat.send_stream(shopper.id, body.session_id, body.message.strip()):
+                    yield json.dumps(item) + "\n"
+            except Exception:
+                logger.exception("Streaming turn failed for %s", shopper.id)
+                yield json.dumps({"type": "error", "detail": "Something went wrong on my side."}) + "\n"
+
+        return StreamingResponse(lines(), media_type="application/x-ndjson")
 
     @app.get("/api/screen")
     async def current_screen(session_id: str, shopper: Shopper = Depends(current_shopper)) -> ScreenState:

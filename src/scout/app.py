@@ -24,9 +24,9 @@ def build_catalog(settings: Settings) -> CatalogRepository:
     return VertexSearchCatalog(settings)
 
 
-def build_root_agent(settings: Settings | None = None) -> BaseAgent:
+def build_root_agent(settings: Settings | None = None, catalog: CatalogRepository | None = None) -> BaseAgent:
     settings = settings or get_settings()
-    catalog = build_catalog(settings)
+    catalog = catalog or build_catalog(settings)
     images = ImageFetcher()                  # shared, so photos downloaded once are reused by every agent
     return ScoutOrchestrator(
         elicitation=ElicitationAgentBuilder(settings, catalog).build(),
