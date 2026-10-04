@@ -45,6 +45,31 @@ export const api = {
     (await request("/api/sessions", { method: "POST", body: { preferred_name: preferredName } })).json(),
   chat: async (sessionId, message) =>
     (await request("/api/chat", { method: "POST", body: { session_id: sessionId, message } })).json(),
+  // Scout's reply as it is written: onEvent gets {type: "delta" | "screen" | "done"} items.
+  // Resolves with the final "done" item.
+  chatStream: async (sessionId, message, onEvent) => {
+    const response = await request("/api/chat/stream", { method: "POST", body: { session_id: sessionId, message } });
+    const reader = response.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = "";
+    let done = null;
+    for (;;) {
+      const { value, done: finished } = await reader.read();
+      buffer += decoder.decode(value || new Uint8Array(), { stream: !finished });
+      const lines = buffer.split("\n");
+      buffer = finished ? "" : lines.pop();
+      for (const line of lines) {
+        if (!line.trim()) continue;
+        const item = JSON.parse(line);
+        if (item.type === "error") throw new Error(item.detail);
+        if (item.type === "done") done = item;
+        onEvent(item);
+      }
+      if (finished) break;
+    }
+    if (!done) throw new Error("The reply was cut off.");
+    return done;
+  },
   speech: async (text, rate) =>
     (await request("/api/speech", { method: "POST", body: { text, rate } })).blob(),
 };

@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { api, setCredentials } from "./api.js";
 import { earcons } from "./audio/earcons.js";
-import { useSpeaker, useSpeechInput } from "./hooks/useVoice.js";
+import { useSpeaker, useSpeechInput, words } from "./hooks/useVoice.js";
 import SignIn from "./components/SignIn.jsx";
 import Header from "./components/Header.jsx";
 import Conversation from "./components/Conversation.jsx";
@@ -10,14 +10,21 @@ import ProductList from "./components/ProductList.jsx";
 import CartPanel from "./components/CartPanel.jsx";
 
 const EMPTY_SCREEN = { products: [], cart: { items: [], total: 0 }, focus_product_id: null };
-const DEFAULT_SETTINGS = { voice: true, rate: 1, language: "en-IN", highContrast: false, largeText: false };
+const DEFAULT_SETTINGS = {
+  voice: true, rate: 1, language: "en-IN", highContrast: false, largeText: false, headphones: false,
+};
+
+// Through speakers the microphone also hears Scout, so interrupting Scout takes a clear phrase
+// of the shopper's own words. With headphones there is no echo, so any word interrupts.
+const MIN_INTERRUPT_WORDS = 3;
 
 let nextMessageId = 1;
 const message = (role, text) => ({ id: nextMessageId++, role, text });
 
 // The conversation loop, hands-free:
 //   Scout speaks -> "your turn" chime -> shopper speaks -> soft "thinking" tick -> Scout speaks ...
-// The microphone stays open throughout. Speaking over Scout interrupts it immediately.
+// The microphone stays open throughout. Speaking over Scout interrupts it (with speakers, it takes
+// a short phrase, so Scout's own voice coming back through the microphone never counts as the shopper).
 export default function App() {
   const [shopper, setShopper] = useState(null); // { name, credentials, leave }
   const [sessionId, setSessionId] = useState(null);
@@ -29,12 +36,13 @@ export default function App() {
   const [announcement, setAnnouncement] = useState("");
 
   const speaker = useSpeaker();
-  const { speak, stop: stopSpeaking, isEcho } = speaker;
+  const { speak, startStream, stop: stopSpeaking, isEcho, audibleAt } = speaker;
 
   // Refs let the always-on microphone callbacks see the latest values.
   const settingsRef = useRef(settings);
   settingsRef.current = settings;
   const busyRef = useRef(false);
+  const queuedRef = useRef(null); // what the shopper said while Scout was still finishing a turn
   const sessionRef = useRef(null);
   const listeningRef = useRef(false);
 
@@ -60,46 +68,94 @@ export default function App() {
 
   const send = useCallback(
     async (text) => {
-      if (!text || !sessionRef.current || busyRef.current) return;
+      if (!text || !sessionRef.current) return;
+      if (busyRef.current) {
+        queuedRef.current = text; // Scout is still finishing (e.g. learning in the background): say it next
+        return;
+      }
       stopSpeaking();
       setPaused(false);
       setMessages((all) => [...all, message("shopper", text)]);
       busyRef.current = true;
       setBusy(true);
       earcons.thinking();
+
+      // Scout's words are shown and spoken while they are still being written.
+      const reply = message("scout", "");
+      let shown = false;
+      let afterSpeaking = yourTurn; // replaced below for "pause" and "end"
+      const voice = settingsRef.current.voice
+        ? startStream(settingsRef.current.rate, () => afterSpeaking())
+        : null;
+      const showReply = (fullText) => {
+        if (!shown) {
+          shown = true;
+          setMessages((all) => [...all, { ...reply, text: fullText }]);
+        } else {
+          setMessages((all) => all.map((m) => (m.id === reply.id ? { ...m, text: fullText } : m)));
+        }
+      };
+
       try {
-        const turn = await api.chat(sessionRef.current, text);
-        setScreen({ products: turn.products, cart: turn.cart, focus_product_id: turn.focus_product_id });
+        let soFar = "";
+        const turn = await api.chatStream(sessionRef.current, text, (item) => {
+          if (item.type === "delta") {
+            soFar += item.text;
+            showReply(soFar);
+            voice?.push(item.text);
+          } else if (item.type === "screen" || item.type === "done") {
+            setScreen({ products: item.products, cart: item.cart, focus_product_id: item.focus_product_id });
+          }
+        });
         if (turn.action === "pause") {
+          afterSpeaking = () => {};
           setPaused(true); // quiet, but still listening
           earcons.paused();
         } else if (turn.action === "end") {
-          scoutSays(turn.reply, () => {
+          afterSpeaking = () => {
             voiceInputRef.current.stop();
             earcons.goodbye();
-          });
-        } else {
-          scoutSays(turn.reply);
+          };
         }
+        setAnnouncement(turn.reply);
+        if (voice) voice.end();
+        else afterSpeaking();
       } catch (error) {
+        stopSpeaking();
         scoutSays(`Sorry, something went wrong on my side. ${error.message || ""} Could you try again?`);
       } finally {
         busyRef.current = false;
         setBusy(false);
+        const queued = queuedRef.current;
+        queuedRef.current = null;
+        if (queued) send(queued);
       }
     },
-    [stopSpeaking, scoutSays]
+    [stopSpeaking, startStream, scoutSays, yourTurn]
   );
+
+  // Is this the shopper talking over Scout, rather than Scout's own voice coming back?
+  const isInterruption = (text) =>
+    !isEcho(text) && (settingsRef.current.headphones || words(text).length >= MIN_INTERRUPT_WORDS);
+
+  // Should a finished phrase be sent? Judged by when it STARTED: while Scout was playing it must be a
+  // real interruption; just after Scout stopped it must not be Scout's words; after that it is the shopper.
+  const isShopperSpeech = (text, startedAt) => {
+    const audible = audibleAt(startedAt);
+    if (audible === "playing") return isInterruption(text);
+    if (audible === "tail") return !isEcho(text);
+    return true;
+  };
 
   const voiceInput = useSpeechInput({
     language: settings.language,
     // Barge-in: the shopper starts talking over Scout, so Scout stops at once.
     onInterim: (text) => {
-      if (speaker.speaking && !isEcho(text)) stopSpeaking();
+      if (speaker.speaking && isInterruption(text)) stopSpeaking();
     },
-    onFinal: (text) => {
-      if (isEcho(text) || busyRef.current) return; // Scout's own voice, or still answering
-      send(text);
+    onFinal: (text, startedAt) => {
+      if (!isShopperSpeech(text, startedAt)) return; // Scout's own voice
+      send(text);                                     // queued if Scout is still finishing its turn
     },
   });
   const voiceInputRef = useRef(voiceInput);

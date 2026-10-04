@@ -63,6 +63,21 @@ export default function ProductList({ products, focusId, busy, onAsk }) {
                       </span>
                     )}
                   </p>
+                  {product.evidence?.length > 0 && (
+                    <div className="evidence">
+                      <p className="evidence__title" id={`evidence-${product.id}`}>
+                        What reviewers say
+                      </p>
+                      <ul className="evidence__list" aria-labelledby={`evidence-${product.id}`}>
+                        {product.evidence.map((item) => (
+                          <li key={item.quote} className={item.heads_up ? "evidence__item is-heads-up" : "evidence__item"}>
+                            {item.heads_up && <span className="evidence__flag">Heads-up: </span>}
+                            <q>{item.quote}</q> <span className="evidence__count">— {item.count}</span>
+                          </li>
+                        ))}
+                      </ul>
+                    </div>
+                  )}
                   <div className="product__actions">
                     <button
                       className="button button--quiet"

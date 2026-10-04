@@ -19,14 +19,24 @@ class SearchQuery(BaseModel):
 
     text: str = ""                           # natural language, e.g. "breathable shirt for a beach wedding"
     category: Optional[str] = None
+    product_types: list[str] = Field(default_factory=list)   # any of these kinds, e.g. ["shirt", "polo"]
+    gender: Optional[str] = None             # "men" or "women": their items plus unisex ones
     min_price: Optional[float] = None
     max_price: Optional[float] = None
     min_rating: Optional[float] = None
     limit: int = Field(default=8, ge=1, le=50)
 
+    def genders(self) -> list[str]:
+        """Product genders that suit this query: a women's search also fits unisex items."""
+        return [self.gender, "unisex"] if self.gender in ("men", "women") else []
+
     def matches(self, product: Product) -> bool:
         """Check the structured constraints locally (used when the backend cannot filter)."""
         if self.category and (product.category or "").lower() != self.category.lower():
+            return False
+        if self.product_types and (product.product_type or "").lower() not in {t.lower() for t in self.product_types}:
+            return False
+        if self.genders() and (product.gender or "") not in self.genders():
             return False
         if self.min_price is not None and (product.price is None or product.price < self.min_price):
             return False
@@ -51,3 +61,7 @@ class CatalogRepository(ABC):
     @abstractmethod
     def categories(self) -> list[str]:
         """Categories present in the catalog, so agents never hard-code them."""
+
+    @abstractmethod
+    def product_types(self) -> list[str]:
+        """Kinds of product present in the catalog (e.g. shirt, polo, sneaker), for the same reason."""

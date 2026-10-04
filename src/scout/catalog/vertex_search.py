@@ -5,8 +5,8 @@ Responsibilities (and nothing else):
   - build Vertex AI Search requests from a SearchQuery
   - read documents back and hand each one to ProductMapper
 
-It knows only the three filter field names (category, price, rating) through
-FilterFields, so a different catalog just passes different names. If the data
+It knows only the filter field names (category, product type, gender, price,
+rating) through FilterFields, so a different catalog just passes different names. If the data
 store schema does not mark those fields filterable, it falls back to filtering
 the results locally instead of failing.
 """
@@ -35,6 +35,8 @@ class FilterFields:
     """Names of the filterable fields in the Vertex AI Search schema."""
 
     category: str = "category"
+    product_type: str = "product_type"
+    gender: str = "gender"
     price: str = "price"
     rating: str = "average_rating"
 
@@ -49,6 +51,7 @@ class VertexSearchCatalog(CatalogRepository):
         self._search_client = discoveryengine.SearchServiceClient(client_options=self._client_options())
         self._server_filtering = True        # switched off once if the schema rejects our filters
         self._categories: Optional[list[str]] = None
+        self._product_types: Optional[list[str]] = None
 
     # -----------------------------------------------------------------
     # CatalogRepository
@@ -82,18 +85,29 @@ class VertexSearchCatalog(CatalogRepository):
 
     def categories(self) -> list[str]:
         if self._categories is None:        # the catalog rarely changes; ask once per process
-            self._categories = self._categories_from_facets() or self._categories_from_documents()
+            self._categories = (self._facet_values(self._fields.category)
+                                or self._values_from_documents(lambda p: p.category))
         return self._categories
+
+    def product_types(self) -> list[str]:
+        if self._product_types is None:
+            self._product_types = (self._facet_values(self._fields.product_type)
+                                   or self._values_from_documents(lambda p: p.product_type))
+        return self._product_types
 
     # -----------------------------------------------------------------
     # Request building (public so it can be unit-tested without the cloud)
     # -----------------------------------------------------------------
 
     def build_filter(self, query: SearchQuery) -> str:
-        """e.g.  category: ANY("shoe") AND price <= 80.0 AND average_rating >= 4.0"""
+        """e.g.  category: ANY("shoe") AND gender: ANY("women", "unisex") AND price <= 80.0"""
         clauses = []
         if query.category:
             clauses.append(f'{self._fields.category}: ANY("{_escape(query.category)}")')
+        if query.product_types:
+            clauses.append(f"{self._fields.product_type}: ANY({_any_of(query.product_types)})")
+        if query.genders():
+            clauses.append(f"{self._fields.gender}: ANY({_any_of(query.genders())})")
         if query.min_price is not None:
             clauses.append(f"{self._fields.price} >= {query.min_price}")
         if query.max_price is not None:
@@ -124,24 +138,23 @@ class VertexSearchCatalog(CatalogRepository):
                 break
         return products
 
-    def _categories_from_facets(self) -> list[str]:
+    def _facet_values(self, field: str) -> list[str]:
         request = _Request(
             serving_config=self._settings.search_serving_config,
             query="",
             page_size=1,
             facet_specs=[_Request.FacetSpec(
-                facet_key=_Request.FacetSpec.FacetKey(key=self._fields.category), limit=100)],
+                facet_key=_Request.FacetSpec.FacetKey(key=field), limit=100)],
         )
         try:
             response = self._search_client.search(request)
             return sorted(v.value for facet in response.facets for v in facet.values if v.value)
         except InvalidArgument as error:
-            logger.warning("Category facet unavailable (%s). Reading categories from documents.",
-                           error.message)
+            logger.warning("Facet %r unavailable (%s). Reading values from documents.", field, error.message)
             return []
 
-    def _categories_from_documents(self) -> list[str]:
-        return sorted({p.category for p in self._run_search("", "", 50) if p.category})
+    def _values_from_documents(self, value_of) -> list[str]:
+        return sorted({value_of(p) for p in self._run_search("", "", 50) if value_of(p)})
 
     def _to_product(self, document) -> Product:
         data = MessageToDict(document._pb)
@@ -156,3 +169,7 @@ class VertexSearchCatalog(CatalogRepository):
 
 def _escape(text: str) -> str:
     return text.replace("\\", "\\\\").replace('"', '\\"')
+
+
+def _any_of(values: list[str]) -> str:
+    return ", ".join(f'"{_escape(v)}"' for v in values)

@@ -14,9 +14,10 @@ import asyncio
 import json
 import logging
 import re
-from typing import Optional
+from typing import AsyncIterator, Optional
 
 from google.adk.agents import BaseAgent
+from google.adk.agents.run_config import RunConfig, StreamingMode
 from google.adk.runners import Runner
 from google.adk.sessions import InMemorySessionService
 from google.genai import types
@@ -24,12 +25,19 @@ from pydantic import BaseModel, Field
 
 from scout.agents import state_keys
 from scout.api.shopper_repository import ShopperMemory, ShopperRepository
-from scout.domain import Preference, PreferenceProfile, Product
-from scout.tools import Cart, CartItem
+from scout.domain import Preference, PreferenceProfile, Product, ShoppingNeed
+from scout.tools import Cart, CartItem, EvidencePicker
 
 logger = logging.getLogger(__name__)
 
 APP_NAME = "scout"
+_EVIDENCE = EvidencePicker()
+
+
+class EvidenceView(BaseModel):
+    quote: str            # word for word from a real review
+    count: str            # e.g. "3 of 10 reviews"
+    heads_up: bool = False
 
 
 class ProductCard(BaseModel):
@@ -42,6 +50,7 @@ class ProductCard(BaseModel):
     image_url: Optional[str] = None
     summary: str = ""
     exact_match: bool = True
+    evidence: list[EvidenceView] = Field(default_factory=list)   # review quotes that back this option
 
 
 class CartView(BaseModel):
@@ -111,6 +120,52 @@ class ScoutChatService:
         if not reply and action != "pause":
             reply = "Sorry, I lost my train of thought. Could you say that again?"
         return ChatTurn(reply=reply, action=action, **_screen_from_state(session.state).model_dump())
+
+    async def send_stream(self, user_id: str, session_id: str, text: str) -> AsyncIterator[dict]:
+        """Like send(), but Scout's words arrive while they are being written, so the shopper hears
+        the first sentence within a second or two instead of waiting for the whole reply.
+
+        Yields, in order:
+          {"type": "delta", "text": ...}       a piece of the reply (append it)
+          {"type": "screen", products, ...}    what to show, as soon as a spoken message is complete
+          {"type": "done", reply, action, ...} the whole turn, after any background learning finished
+        """
+        before = _memory_from_state((await self._get(user_id, session_id)).state)
+        message = types.Content(role="user", parts=[types.Part(text=text)])
+        streaming = RunConfig(streaming_mode=StreamingMode.SSE)
+        replies: list[str] = []
+        streamed = False          # pieces of the current message were already sent
+        async for event in self._runner.run_async(user_id=user_id, session_id=session_id,
+                                                  new_message=message, run_config=streaming):
+            raw = _raw_text(event)
+            if not raw:
+                continue
+            if getattr(event, "partial", False):
+                piece = _FORMATTING.sub("", raw)
+                if piece:
+                    if not streamed and replies:
+                        piece = "\n\n" + piece.lstrip()    # a second message in the same turn
+                    streamed = True
+                    yield {"type": "delta", "text": piece}
+                continue
+            whole = _FORMATTING.sub("", raw).strip()
+            if not streamed and whole:                     # said in one go (e.g. a question): send it now
+                yield {"type": "delta", "text": ("\n\n" if replies else "") + whole}
+            if whole:
+                replies.append(whole)
+            streamed = False
+            state = (await self._get(user_id, session_id)).state
+            yield {"type": "screen", **_screen_from_state(state).model_dump(mode="json")}
+
+        session = await self._get(user_id, session_id)
+        await self._remember(user_id, before, _memory_from_state(session.state))
+        action = _ACTIONS.get(_intent(session.state))
+        reply = "\n\n".join(replies)
+        if not reply and action != "pause":
+            reply = "Sorry, I lost my train of thought. Could you say that again?"
+            yield {"type": "delta", "text": reply}
+        turn = ChatTurn(reply=reply, action=action, **_screen_from_state(session.state).model_dump())
+        yield {"type": "done", **turn.model_dump(mode="json")}
 
     async def screen(self, user_id: str, session_id: str) -> ScreenState:
         return _screen_from_state((await self._get(user_id, session_id)).state)
@@ -188,16 +243,23 @@ def _spoken_cart(cart: Cart, named: int = 2) -> str:
 
 def _text_of(event) -> str:
     """The spoken text of an agent event, as plain text."""
-    if getattr(event, "partial", False) or not event.content or not event.content.parts:
+    if getattr(event, "partial", False):
         return ""
-    text = "".join(part.text or "" for part in event.content.parts if not getattr(part, "thought", False))
-    return _FORMATTING.sub("", text).strip()
+    return _FORMATTING.sub("", _raw_text(event)).strip()
+
+
+def _raw_text(event) -> str:
+    """All non-thought text in an event (a whole message, or a streamed piece of one)."""
+    if not event.content or not event.content.parts:
+        return ""
+    return "".join(part.text or "" for part in event.content.parts if not getattr(part, "thought", False))
 
 
 def _screen_from_state(state: dict) -> ScreenState:
     by_id = {item.get("id"): item for item in state.get(state_keys.SHORTLIST) or []}
     exact = set(state.get(state_keys.EXACT_MATCHES) or [])
     all_exact = not state.get(state_keys.RELAXED)        # nothing was relaxed: every option matches
+    need = ShoppingNeed.model_validate(state.get(state_keys.NEED) or {})
     cards = []
     for position, product_id in enumerate(state.get(state_keys.PRESENTED) or [], start=1):
         if product_id not in by_id:
@@ -213,6 +275,8 @@ def _screen_from_state(state: dict) -> ScreenState:
             image_url=product.image_urls[0] if product.image_urls else None,
             summary=product.short_description,
             exact_match=all_exact or product.id in exact,
+            evidence=[EvidenceView(quote=e.quote, count=e.count_text(), heads_up=e.sentiment == "negative")
+                      for e in _EVIDENCE.pick(product, need)],
         ))
     cart = Cart.model_validate(state.get(state_keys.CART) or {})
     return ScreenState(products=cards, focus_product_id=state.get(state_keys.FOCUS_PRODUCT),

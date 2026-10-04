@@ -10,21 +10,30 @@ records which products are exact and what was relaxed for the rest, so Scout
 can be honest ("I only have one glittery pair, but these flats would also
 suit a wedding"). The budget is only relaxed when nothing at all fits.
 
+Who the item is for (men's / women's) and the kind of product asked for
+(a shirt, not any top) are never relaxed: showing a women's blouse to someone
+who asked for a men's shirt is not "related", it is wrong. When those leave
+only a few products, it lists the other kinds the shop has for the same
+person instead, so Scout can OFFER them rather than slip them in.
+
 It depends only on the CatalogRepository interface, so any catalog works.
 """
 
+import re
+from collections import Counter
 from typing import Optional
 
 from pydantic import BaseModel, Field
 
 from scout.catalog import CatalogRepository, SearchQuery
-from scout.domain import Product, ShoppingNeed
+from scout.domain import COLOURS, Product, ShoppingNeed
 
 
 class RetrievalResult(BaseModel):
     products: list[Product] = Field(default_factory=list)    # exact matches first, then related ones
     exact_ids: list[str] = Field(default_factory=list)       # products that match everything asked for
     relaxed: list[str] = Field(default_factory=list)         # what was relaxed for the related ones, e.g. ["details"]
+    other_types: list[str] = Field(default_factory=list)     # other kinds in stock for the same person, when few matched
     query_text: str = ""
 
     @property
@@ -33,10 +42,11 @@ class RetrievalResult(BaseModel):
 
 
 class ProductRetriever:
-    def __init__(self, catalog: CatalogRepository, limit: int = 8, target: int = 6):
+    def __init__(self, catalog: CatalogRepository, limit: int = 8, target: int = 6, few: int = 3):
         self._catalog = catalog
         self._limit = limit      # products per search call
         self._target = target    # stop topping up once the shortlist has this many
+        self._few = few          # below this many, offer the other kinds the shop has
 
     def find(self, need: ShoppingNeed, exclude_ids: Optional[set[str]] = None) -> RetrievalResult:
         """Exact matches first, topped up with related products. `exclude_ids` skips products already shown."""
@@ -45,6 +55,7 @@ class ProductRetriever:
         exact_ids: list[str] = []
         relaxed_for_rest: list[str] = []
 
+        within_budget: set[str] = set()
         for relaxed, query in self._attempts(need):
             if collected and "budget" in relaxed:
                 break                          # never trade the budget away just to top up
@@ -55,16 +66,30 @@ class ProductRetriever:
                 continue
             if relaxed:
                 relaxed_for_rest = relaxed_for_rest or relaxed
-            else:
+            if "budget" not in relaxed:
+                within_budget |= {p.id for p in hits}
+            if not relaxed and not need.must_have:
                 exact_ids += [p.id for p in hits]
             collected += hits
-            if len(collected) >= self._target:
+            # With must-haves (a colour, "stretchy"), keep looking: semantic search ranks, it does not check.
+            if len(collected) >= self._target and (not need.must_have or self._exact_count(collected, need) >= self._few):
                 break
 
+        if need.must_have:
+            # Only must-haves that some product states can be checked ("black" can; "soft" rarely is written
+            # down, and must not make every product inexact). Exact = states all checkable ones; best first.
+            checkable = _checkable(need.must_have, collected)
+            met = {p.id: sum(has_all(p, [t]) for t in checkable) for p in collected}
+            exact_ids = [p.id for p in collected if p.id in within_budget and met[p.id] == len(checkable)]
+            collected.sort(key=lambda p: (p.id not in exact_ids, -met[p.id]))   # stable: search order otherwise
+            if len(exact_ids) < len(collected):
+                relaxed_for_rest = relaxed_for_rest or ["details"]
+
+        other_types = self._other_types(need) if need.product_types and len(collected) < self._few else []
         if not collected:
-            return RetrievalResult(relaxed=["everything"], query_text=need.search_text())
-        return RetrievalResult(products=collected[: self._limit], exact_ids=exact_ids,
-                               relaxed=relaxed_for_rest, query_text=need.search_text())
+            return RetrievalResult(relaxed=["everything"], other_types=other_types, query_text=need.search_text())
+        return RetrievalResult(products=collected[: self._limit], exact_ids=exact_ids, relaxed=relaxed_for_rest,
+                               other_types=other_types, query_text=need.search_text())
 
     def _attempts(self, need: ShoppingNeed) -> list[tuple[list[str], SearchQuery]]:
         """Search plans from strictest to loosest.
@@ -75,7 +100,9 @@ class ProductRetriever:
         full_text = need.search_text()
         short_text = need.looking_for or need.category or full_text
         broad_text = " ".join(p for p in [need.category or short_text, need.purpose or ""] if p)
-        category_only = need.category or short_text
+        # An empty query with the filters lists every product that fits; searching for the bare word
+        # "top" instead ranks by that word and can leave real matches out.
+        category_only = "" if need.category else short_text
         budget = need.budget_max
 
         plans = [
@@ -90,11 +117,26 @@ class ProductRetriever:
         attempts, seen = [], set()
         for relaxed, text, max_price in plans:
             key = (text, max_price)
-            if text and key not in seen:                    # skip duplicate searches
+            if (text or need.category) and key not in seen:  # skip duplicate searches
                 seen.add(key)
-                attempts.append((relaxed, SearchQuery(text=text, category=need.category,
-                                                      max_price=max_price, limit=self._limit)))
+                attempts.append((relaxed, SearchQuery(
+                    text=text, category=need.category, product_types=need.product_types,
+                    gender=need.gender_filter(), max_price=max_price, limit=self._limit)))
         return attempts
+
+    @staticmethod
+    def _exact_count(products: list[Product], need: ShoppingNeed) -> int:
+        checkable = _checkable(need.must_have, products)
+        return sum(1 for p in products if has_all(p, checkable)) if checkable else len(products)
+
+    def _other_types(self, need: ShoppingNeed) -> list[str]:
+        """Other kinds of product in the same category for the same person, most common first."""
+        query = SearchQuery(text="" if need.category else need.search_text(), category=need.category,
+                            gender=need.gender_filter(), max_price=need.budget_max, limit=50)
+        wanted = {t.lower() for t in need.product_types}
+        counts = Counter(p.product_type for p in self._catalog.search(query)
+                         if p.product_type and p.product_type.lower() not in wanted)
+        return [kind for kind, _ in counts.most_common(3)]
 
     @staticmethod
     def _without_avoided(products: list[Product], avoid: list[str]) -> list[Product]:
@@ -119,3 +161,38 @@ class ProductRetriever:
 def find_products(retriever: ProductRetriever, need: Optional[dict]) -> RetrievalResult:
     """Convenience for callers holding the need as a plain dict (e.g. from session state)."""
     return retriever.find(ShoppingNeed.model_validate(need or {}))
+
+
+def has_all(product: Product, must_have: list[str]) -> bool:
+    """Do the product's own facts (title, type, attributes, style, description) mention every must-have?
+
+    Word-level and forgiving about endings ("stretchy" matches "stretch"), so it checks what is stated
+    rather than trusting the search ranking: a "black jeans" search must not call blue jeans exact.
+    """
+    facts = word_stems(" ".join([product.title, product.product_type or "", product.description or "",
+                                  *product.style_tags,
+                                  *(f"{a.name} {a.value}" for a in product.attributes)]))
+    return all(word_stems(term) <= facts for term in must_have if word_stems(term))
+
+
+_FILLER = {"a", "an", "the", "and", "or", "with", "of", "in", "on", "for", "to", "very", "really", "some"}
+
+
+def word_stems(text: str) -> set[str]:
+    stems = set()
+    for word in re.findall(r"[a-z0-9]+", (text or "").lower()):
+        if word in _FILLER:
+            continue
+        for suffix in ("iness", "ness", "ing", "ed", "es", "y", "s"):
+            if word.endswith(suffix) and len(word) - len(suffix) >= 3:
+                word = word[: -len(suffix)]
+                break
+        stems.add(word)
+    return stems
+
+
+def _checkable(must_have: list[str], products: list[Product]) -> list[str]:
+    """Must-haves that product data can confirm: colours always (every product records its colour, so "no
+    black one here" is a real answer), anything else only if some product states it ("soft" rarely is)."""
+    return [term for term in must_have
+            if word_stems(term) & COLOURS or any(has_all(p, [term]) for p in products)]

@@ -28,6 +28,8 @@ class FieldMap:
     id: tuple[str, ...] = ("product_id", "id")
     title: tuple[str, ...] = ("title", "name")
     category: tuple[str, ...] = ("category",)
+    product_type: tuple[str, ...] = ("product_type",)
+    gender: tuple[str, ...] = ("gender",)
     brand: tuple[str, ...] = ("brand", "store")
     price: tuple[str, ...] = ("price",)
     rating: tuple[str, ...] = ("average_rating", "rating")
@@ -41,6 +43,7 @@ class FieldMap:
     review_summary: tuple[str, ...] = ("review_summary",)
     review_points: tuple[str, ...] = ("review_points", "review_aspects")
     review_excerpts: tuple[str, ...] = ("review_excerpts",)
+    reviews_analyzed: tuple[str, ...] = ("reviews_analyzed",)
     ignored: tuple[str, ...] = ("search_text",)   # index-only fields, never shown to agents
 
 
@@ -63,6 +66,8 @@ class ProductMapper:
             id=str(pick("id") or fallback_id),
             title=_text(pick("title")) or "Untitled product",
             category=_text(pick("category")),
+            product_type=_text(pick("product_type")),
+            gender=_text(pick("gender")),
             brand=_text(pick("brand")),
             price=_number(pick("price")),
             rating=_number(pick("rating")),
@@ -76,6 +81,7 @@ class ProductMapper:
             review_summary=_text(pick("review_summary")),
             review_points=_review_points(pick("review_points")),
             review_excerpts=_string_list(pick("review_excerpts")),
+            reviews_analyzed=_integer(pick("reviews_analyzed")),
         )
         product.extra = {k: v for k, v in record.items() if k not in used and not _is_empty(v)}
         return product
@@ -157,6 +163,8 @@ def _review_points(value: Any) -> list[ReviewPoint]:
                     finding=_text(item["finding"]),
                     sentiment=item.get("sentiment"),
                     mentions=_integer(item.get("mentions")),
+                    supporting_reviews=_integer(item.get("supporting_reviews")),
+                    quotes=_string_list(item.get("quotes")),
                 ))
         return result
     return []

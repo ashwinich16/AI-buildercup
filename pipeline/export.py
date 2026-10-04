@@ -121,12 +121,14 @@ class CatalogReader:
 
     PRODUCTS_SQL = """
         SELECT p.product_id, p.title, p.store, p.brand, p.main_category, p.category,
+               p.product_type, p.gender,
                p.description, p.features, p.price, p.average_rating, p.rating_number,
                pi.visual_attributes AS attributes, pi.style_tags, pi.review_summary,
-               pi.review_aspects AS review_points,
+               pi.review_aspects AS review_points, pi.reviews_analyzed,
                pi.spoken_summary_short, pi.spoken_summary_detailed
         FROM product p
         LEFT JOIN product_intelligence pi ON pi.product_id = p.product_id
+        WHERE p.excluded_reason IS NULL          -- products kept in the DB but left out of the shop
         ORDER BY p.product_id;
     """
 
@@ -185,7 +187,7 @@ class SearchDocumentBuilder:
     """
 
     SEARCH_TEXT_FIELDS = (
-        "title", "brand", "category", "description", "features",
+        "title", "brand", "category", "product_type", "gender", "description", "features",
         "attributes", "style_tags", "review_summary", "spoken_summary_detailed",
     )
 

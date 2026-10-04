@@ -35,11 +35,17 @@ class ReviewPoint(BaseModel):
     aspect: str
     finding: str
     sentiment: Optional[str] = None       # positive / negative / mixed
-    mentions: Optional[int] = None
+    mentions: Optional[int] = None        # Gemini's estimate (older data)
+    supporting_reviews: Optional[int] = None   # counted from the reviews that say it (review_evidence.py)
+    quotes: list[str] = Field(default_factory=list)   # word-for-word snippets, checked against the reviews
+
+    def count(self) -> Optional[int]:
+        return self.supporting_reviews if self.supporting_reviews is not None else self.mentions
 
     def as_text(self) -> str:
-        count = f" ({self.mentions} mentions)" if self.mentions else ""
-        return f"{self.aspect}: {self.finding}{count}"
+        count = f" ({self.count()} mentions)" if self.count() else ""
+        quote = f' e.g. "{self.quotes[0]}"' if self.quotes else ""
+        return f"{self.aspect}: {self.finding}{count}{quote}"
 
 
 class Product(BaseModel):
@@ -47,6 +53,8 @@ class Product(BaseModel):
     id: str
     title: str
     category: Optional[str] = None
+    product_type: Optional[str] = None    # the kind within the category, e.g. "polo" in "top"
+    gender: Optional[str] = None          # who it is made for: "men", "women" or "unisex"
     brand: Optional[str] = None
     price: Optional[float] = None
     rating: Optional[float] = None
@@ -66,6 +74,7 @@ class Product(BaseModel):
     review_summary: Optional[str] = None
     review_points: list[ReviewPoint] = Field(default_factory=list)
     review_excerpts: list[str] = Field(default_factory=list)
+    reviews_analyzed: Optional[int] = None     # how many reviews the review points were drawn from
 
     # Anything else from the source data
     extra: dict[str, Any] = Field(default_factory=dict)
@@ -86,7 +95,7 @@ class Product(BaseModel):
         """Review points grouped by aspect: 'fit: too narrow / fits perfectly (7 mentions)'."""
         grouped: dict[str, list[str]] = {}
         for point in self.review_points:
-            count = f" ({point.mentions} mentions)" if point.mentions else ""
+            count = f" ({point.count()} mentions)" if point.count() else ""
             grouped.setdefault(point.aspect, []).append(point.finding + count)
         parts = []
         for aspect, findings in grouped.items():
@@ -129,6 +138,10 @@ class Product(BaseModel):
         facts = []
         if self.category:
             facts.append(f"category {self.category}")
+        if self.product_type:
+            facts.append(f"type {self.product_type}")
+        if self.gender:
+            facts.append("unisex" if self.gender == "unisex" else f"{self.gender}'s")
         if self.brand:
             facts.append(f"brand {self.brand}")
         facts.append(f"price ${self.price:.2f}" if self.price is not None else "price unknown")

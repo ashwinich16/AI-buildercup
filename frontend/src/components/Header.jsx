@@ -14,6 +14,15 @@ export default function Header({ shopper, settings, onSettingsChange, onLeave })
           <span>Scout speaks replies</span>
         </label>
 
+        <label className="toggle">
+          <input
+            type="checkbox"
+            checked={settings.headphones}
+            onChange={(e) => set("headphones", e.target.checked)}
+          />
+          <span>Using headphones (interrupt Scout with any word)</span>
+        </label>
+
         <label className="select">
           <span>Listening language</span>
           <select value={settings.language} onChange={(e) => set("language", e.target.value)}>

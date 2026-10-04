@@ -43,8 +43,8 @@ class AgentTuning:
 # SCOUT_<AGENT>_THINKING_BUDGET and SCOUT_<AGENT>_MODEL, e.g. SCOUT_PRODUCT_EXPERT_MODEL.
 # A new agent only needs one line here.
 AGENT_TUNING_DEFAULTS = {
-    "elicitation": AgentTuning(temperature=0.5, thinking_budget=1024),
-    "narration": AgentTuning(temperature=0.7, thinking_budget=256),         # wording; analysis is done elsewhere
+    "elicitation": AgentTuning(temperature=0.5, thinking_budget=512),       # 512 keeps the asking rules; 256 broke them
+    "narration": AgentTuning(temperature=0.7, thinking_budget=0),           # wording only (no thinking: ~1s faster)
     "product_expert": AgentTuning(temperature=0.3, thinking_budget=1024),   # factual + visual
     "comparison": AgentTuning(temperature=0.2, thinking_budget=2048),       # deepest reasoning, consistent
     "preference": AgentTuning(temperature=0.2, thinking_budget=1024),       # runs after the reply: no rush

@@ -24,6 +24,9 @@ from scout.agents.voice import VOICE
 from scout.config import Settings
 from scout.domain import PreferenceProfile, Product, ShoppingNeed
 from scout.tools.cart import Cart
+from scout.tools.review_evidence import EvidencePicker
+
+_EVIDENCE = EvidencePicker()
 
 
 class NarrationTask(str, Enum):
@@ -50,7 +53,7 @@ YOUR TASK
 Present these options in about 80 to 120 words:
 1. Start with a short, natural reaction.
 2. Be honest about matches. Options marked [exact match] have everything they asked for. Options marked [related] do not: say so plainly and kindly, name what they lack, and say what they DO offer for this shopper's need.
-3. Lead with the best option and WHY it suits what they want, plus one detail that helps them picture it.
+3. Lead with the best option and WHY it suits what they want, plus one detail that helps them picture it. Back the why with ONE short quote from its review evidence, said naturally with how many reviews say it (for example, that three of ten reviewers say it fits perfectly). Quote only the evidence given, word for word.
 4. Then each other option in one sentence, with the one way it differs.
 5. Mention a review point only if it matters for their need.
 6. Make the order clear as you speak (first, second...) so they can refer back.
@@ -77,10 +80,10 @@ NO_MORE_OPTIONS = """{voice}
 WHAT THE SHOPPER WANTS
 {need}
 
-They asked for more options, but they have already heard all {already_heard} options the shop has for this.
-
+They asked for more or different options, but they have already heard all {already_heard} options the shop has for this.
+{other_kinds}
 YOUR TASK
-In about 30 words, say kindly and honestly that those were all the options you have for this, and offer ONE helpful change to their need that would open up new options. Do not invent products.
+In about 30 words, say kindly and honestly that those were all the options you have for this, and offer ONE helpful change to their need that would open up new options (if other kinds are listed above, offer one or two of them). Do not invent products.
 """
 
 
@@ -179,10 +182,12 @@ class NarrationAgentBuilder:
         )
 
     def _no_more_options_prompt(self, state: dict) -> str:
+        other_types = state.get(state_keys.OTHER_TYPES) or []
         return NO_MORE_OPTIONS.format(
             voice=VOICE,
             need=_need(state).summary(),
             already_heard=len(state.get(state_keys.SEEN) or []),
+            other_kinds=f"Other kinds the shop has for them: {', '.join(other_types)}.\n" if other_types else "",
         )
 
     def _speak_comparison_prompt(self, state: dict) -> str:
@@ -211,17 +216,33 @@ def _presented_text(state: dict) -> str:
         if product_id in by_id:
             label = "[exact match]" if product_id in exact else "[related]"
             product = Product.model_validate(by_id[product_id])
-            blocks.append(f"Option {number} {label}:\n{product.to_prompt_text()}")
+            evidence = _EVIDENCE.pick(product, _need(state))
+            proof = ("\nReview evidence (real quotes): " + "; ".join(e.as_text() for e in evidence)) if evidence else ""
+            blocks.append(f"Option {number} {label}:\n{product.to_prompt_text()}{proof}")
     return "\n\n".join(blocks) or "None."
 
 
 def _search_note(state: dict) -> str:
     relaxed = state.get(state_keys.RELAXED) or []
     if "everything" in relaxed:
-        return "SEARCH NOTE: nothing matched at all."
-    if "budget" in relaxed:
-        return "SEARCH NOTE: nothing fit their budget, so these may cost more than they wanted. Say so."
-    if relaxed:
-        return ("SEARCH NOTE: options marked [related] do not match every detail they asked for; "
+        note = "SEARCH NOTE: nothing matched at all."
+    elif "budget" in relaxed:
+        note = "SEARCH NOTE: nothing fit their budget, so these may cost more than they wanted. Say so."
+    elif relaxed:
+        note = ("SEARCH NOTE: options marked [related] do not match every detail they asked for; "
                 "they are the closest alternatives in the shop.")
-    return "SEARCH NOTE: these match what they asked for."
+    else:
+        note = "SEARCH NOTE: these match what they asked for."
+    other_types = state.get(state_keys.OTHER_TYPES) or []
+    if other_types:
+        note += (f"\nThat is everything the shop has for: {_kind(state)}. It also has these other kinds for them: "
+                 f"{', '.join(other_types)}. Say naturally, like a friend, that these are all you have of what they "
+                 "asked for (no talk of how items are labelled or 'called'), and in your closing question offer to "
+                 "look at one or two of those other kinds instead. Never present them as what they asked for.")
+    return note
+
+
+def _kind(state: dict) -> str:
+    need = _need(state)
+    kind = " or ".join(need.product_types) or need.category or "items"
+    return f"{need.gender_filter()}'s {kind}" if need.gender_filter() else kind

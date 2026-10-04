@@ -32,12 +32,15 @@ from google.genai import types
 from pydantic import BaseModel, Field, ValidationError
 
 from scout.agents import state_keys
-from scout.catalog import CatalogRepository
+from scout.catalog import CatalogRepository, SearchQuery
 from scout.config import Settings
-from scout.domain import PreferenceProfile, Product, ShoppingNeed
+from scout.domain import COLOURS, PreferenceProfile, Product, ShoppingNeed, colours_wanted, gender_in_words
 from scout.tools.cart import Cart
+from scout.tools.retrieval import word_stems
 
 logger = logging.getLogger(__name__)
+
+MAX_OUTPUT_TOKENS = 4096   # thinking + the JSON answer
 
 Intent = Literal[
     "shop",               # describing or refining what they want
@@ -57,7 +60,7 @@ class TurnUnderstanding(BaseModel):
     intent: Intent
     need: ShoppingNeed = Field(description="The full, updated need: previous need merged with this message")
     still_unclear: list[str] = Field(
-        default_factory=list,
+        default_factory=list, max_length=5,
         description="Details that would still change which products fit; empty when the need is clear")
     ready_to_search: bool = Field(description="True when the need is clear enough to look for products")
     question: Optional[str] = Field(default=None, description="ONE short, friendly question, only if not ready")
@@ -70,12 +73,12 @@ class TurnUnderstanding(BaseModel):
         default=None, description="Number (1, 2, 3...) of the product they mean in PRODUCTS YOU JUST PRESENTED; "
                                   "null if it is not clear which one")
     product_positions: list[int] = Field(
-        default_factory=list, description="For compare: numbers of the products to compare; empty means all presented")
+        default_factory=list, max_length=10, description="For compare: numbers of the products to compare; empty means all presented")
     reason: Optional[str] = Field(default=None, description="For choose/reject: why, in the shopper's words")
     cart_action: Optional[Literal["view", "remove", "clear", "checkout"]] = Field(
         default=None, description="For cart: what they want to do with it; clear = take everything out")
     cart_positions: list[int] = Field(
-        default_factory=list, description="For remove: numbers of the items in THEIR CART to take out; "
+        default_factory=list, max_length=10, description="For remove: numbers of the items in THEIR CART to take out; "
                                           "empty if it is not clear which")
     reply: Optional[str] = Field(
         default=None, description="For other: a short, friendly reply to say to the shopper")
@@ -92,6 +95,7 @@ Understand what the shopper MEANS, whatever words or language they use. Never de
 The shopper usually speaks, and their words reach you through speech recognition, which can mishear a word as a similar-sounding one. When a word does not make sense for shopping, read it as the closest-sounding word that fits the catalog categories and WHAT THE SHOP ACTUALLY HAS, and put that corrected meaning in the need, never the misheard words. If you are not confident in a correction and it would change what you search for, do not search yet: ask one short question that checks the corrected meaning.
 
 CATALOG CATEGORIES: {categories}
+PRODUCT TYPES IN THE SHOP: {product_types}
 
 WHAT YOU KNOW SO FAR
 Need: {need}
@@ -125,14 +129,17 @@ FOR THE SHOPPER'S NEW MESSAGE
    - other: anything else.
 
 2. need: return the COMPLETE updated need. Keep everything already known; add or change only what this message says. Never invent details. category must be one of the catalog categories, or null. When the shopper names a kind of product, use the categories in WHAT THE SHOP ACTUALLY HAS as a strong hint for which catalog category it belongs to.
+   product_types: the specific kind(s) they want, spelled exactly as in PRODUCT TYPES IN THE SHOP. Fill it only when their words clearly mean one kind: a button-up, collared, dress, flannel or Hawaiian shirt is "shirt"; a tee is "t-shirt". A word that people use for several kinds (the plain word "shirt", which many people also use for tees and other tops, or "a top", or "shoes") leaves product_types empty. When they accept another kind you offered, add it.
+   gender: whose STYLE the item is, and only from what the shopper says. Naming the style, or naming the person it is for (a husband, a daughter, a brother), settles it; saying it does not matter means "any". Never infer it from their name, voice, way of talking, profile, or from who is talking: an item "for me" or "for myself" does NOT settle it, because anyone can shop for any style. When they move on to a different kind of product, keep the gender only if they make clear it is for the same person.
 
 3. Decide whether the need is clear. Think about it like a friend would:
    - Imagine searching right now. Would one more answer clearly change WHICH products you would pick? If yes, it is still unclear. If it would only fine-tune the choice, it is clear enough.
    - List those still-unclear details in still_unclear (most important first).
    - Some shoppers are clear after one message; others need a few questions. Decide case by case.
    - Budget is helpful but never required.
-   - Use what you know about this shopper: never ask what their profile already answers, and add their relevant stated or confident preferences to the need (taste to must_have or avoid, their size or fit, their usual budget) unless this message says otherwise.
-   - Who the product is for is still unclear when the shop's matches differ by that and the shopper has not said it.
+   - Use what you know about this shopper: never ask what their profile already answers, and add their relevant stated or confident preferences to the need (taste to must_have or avoid, their size or fit, their usual budget) unless this message says otherwise. One exception: who the item is for. People often shop for someone else, so even when their profile says whose style they usually buy, check it for each new item, offering that style as the likely answer.
+   - Who it is for is unclear when gender is null and "Made for" in WHAT THE SHOP ACTUALLY HAS includes both men's and women's items. It then comes FIRST in still_unclear, because it changes every product you would pick. When the matches are all one style or unisex, it is not unclear.
+   - The kind is unclear when product_types is empty and the shopper's words could mean several kinds the shop has for that person (see "Kinds of ..." in WHAT THE SHOP ACTUALLY HAS). It comes right after who it is for.
    ready_to_search is true when still_unclear is empty, or when the shopper signals they want to see products now rather than answer more questions.
 
 4. If not ready, ask ONE question about the first item in still_unclear. Think like a friend who knows this exact product:
@@ -140,6 +147,8 @@ FOR THE SHOPPER'S NEW MESSAGE
    - Never ask about something already known or already implied by what they said. Never ask two things at once.
    - Choices you offer must be realistic for that exact product AND exist in WHAT THE SHOP ACTUALLY HAS. Never offer a choice the shop cannot satisfy. Use the shopper's own words where you can.
    - Under 20 words, warm and natural; you may react briefly first.
+   - When asking who it is for, ask about the STYLE of the item (men's or women's, using the product's name), never about the shopper's own gender, and in a way that makes shopping for someone else feel normal. If their profile suggests a style, offer it as the likely answer while leaving the other open.
+   - When asking about the kind, offer only kinds listed under "Kinds of ..." for that person, described in everyday words.
    - Offer two or three short possible answers so it is easy to reply by voice.
    - Write a fresh question for this shopper and this product; never a generic or stock question.
    - Respect their patience. If you have already asked 3 or more questions, offer to show options now instead of asking more.
@@ -173,6 +182,7 @@ class ElicitationAgentBuilder:
     def __init__(self, settings: Settings, catalog: CatalogRepository):
         self._settings = settings
         self._catalog = catalog
+        self._genders_by_category: dict[str, set[str]] = {}   # e.g. "jeans" -> {"men", "women"}
 
     def build(self) -> LlmAgent:
         tuning = self._settings.tuning("elicitation")
@@ -185,7 +195,9 @@ class ElicitationAgentBuilder:
             include_contents="none",            # compact state instead of full history
             output_schema=TurnUnderstanding,
             output_key=state_keys.TURN,
-            generate_content_config=types.GenerateContentConfig(temperature=tuning.temperature),
+            # The cap cuts off a model stuck repeating itself in seconds; a normal answer is well under it.
+            generate_content_config=types.GenerateContentConfig(temperature=tuning.temperature,
+                                                                max_output_tokens=MAX_OUTPUT_TOKENS),
             planner=BuiltInPlanner(thinking_config=types.ThinkingConfig(
                 thinking_budget=tuning.thinking_budget)),
             after_model_callback=self._remember,
@@ -197,6 +209,7 @@ class ElicitationAgentBuilder:
         need = ShoppingNeed.model_validate(state.get(state_keys.NEED) or {})
         return INSTRUCTION.format(
             categories=", ".join(self._catalog.categories()) or "unknown",
+            product_types=", ".join(self._catalog.product_types()) or "unknown",
             need=need.model_dump_json(exclude_defaults=True) if need != ShoppingNeed() else "nothing yet",
             last_question=state.get(state_keys.LAST_QUESTION) or "none",
             questions_asked=state.get(state_keys.QUESTIONS_ASKED, 0),
@@ -208,11 +221,19 @@ class ElicitationAgentBuilder:
 
     # ADK calls this after the model answers; the agent keeps its own state up to date.
     def _remember(self, callback_context: CallbackContext, llm_response: LlmResponse) -> Optional[LlmResponse]:
-        turn = self._parse(llm_response)
-        if turn is None:
+        if llm_response.partial:
             return None
-
         state = callback_context.state
+        turn = self._parse(llm_response)
+        if turn is None:   # broken or cut-off answer: keep what we knew and ask again, never crash the turn
+            turn = TurnUnderstanding(
+                intent="other",
+                need=ShoppingNeed.model_validate(state.get(state_keys.NEED) or {}),
+                ready_to_search=False,
+                understood="",
+                reply="Sorry, I lost track for a second there. Could you say that once more?",
+            )
+
         asked = state.get(state_keys.QUESTIONS_ASKED, 0)
 
         # Safety net only: the model decides, but a stuck model must not trap the shopper.
@@ -227,6 +248,19 @@ class ElicitationAgentBuilder:
             requested.append(turn.unavailable_category)
             state[state_keys.REQUESTED_CATEGORIES] = requested   # honest: the request really is noted
 
+        turn.need.product_types = self._known_types(turn.need.product_types)
+        turn.need.gender = self._kept_gender(state, turn.need)
+        message = _text_of(callback_context.user_content)
+        turn.need.avoid = self._grounded_avoid(state, turn, message)
+        if turn.intent in ("shop", "reject"):
+            turn.need.must_have = _with_colours(turn.need.must_have, colours_wanted(message))
+        said = gender_in_words(message)
+        if said and turn.intent in ("shop", "reject"):
+            turn.need.gender = said              # their own words win over the model's reading
+        if self._must_ask_gender(turn, asked):
+            logger.info("Need has no gender for %r; asking before searching.", turn.need.category)
+            turn.ready_to_search = False
+            turn.question = _gender_question(turn.need)
         state[state_keys.NEED] = turn.need.model_dump()
         if turn.question and not turn.ready_to_search:
             state[state_keys.QUESTIONS_ASKED] = asked + 1
@@ -239,6 +273,65 @@ class ElicitationAgentBuilder:
         return llm_response
 
     @staticmethod
+    def _kept_gender(state, need: ShoppingNeed) -> Optional[str]:
+        """The model sometimes drops a style the shopper already gave; keep it while the category stays the same.
+
+        A new category may be for someone else, so there the model's answer stands (it asks again).
+        """
+        previous = ShoppingNeed.model_validate(state.get(state_keys.NEED) or {})
+        if need.gender is None and previous.gender and previous.category == need.category:
+            return previous.gender
+        return need.gender
+
+    def _grounded_avoid(self, state, turn: TurnUnderstanding, message: str) -> list[str]:
+        """Things to avoid hide products, so each one must come from the shopper: their words now (or their
+        reason for rejecting), their saved profile, or an earlier turn. The model sometimes fills `avoid`
+        with features of products it just showed ("denim" for jeans!), which would hide good matches."""
+        previous = {t.lower() for t in ShoppingNeed.model_validate(state.get(state_keys.NEED) or {}).avoid}
+        profile = {p.value.lower() for p in PreferenceProfile.model_validate(state.get(state_keys.PREFERENCES) or {})
+                   .preferences if p.polarity == "avoid"}
+        said = word_stems(f"{message} {turn.reason or ''}")
+        kept = [term for term in self._qualities_only(turn.need)
+                if term.lower() in previous | profile or word_stems(term) & said]
+        return list(dict.fromkeys(kept))
+
+    def _qualities_only(self, need: ShoppingNeed) -> list[str]:
+        """`avoid` is for qualities ("leather", "tight fit"). Switching from women's to men's jeans is not
+        "avoid women's jeans": that would hide products for the wrong reason, so such entries are dropped."""
+        kinds = {k.lower() for k in [*self._catalog.categories(), *self._catalog.product_types()]}
+        return [term for term in need.avoid
+                if not gender_in_words(term) and not ({w.strip("'s") for w in term.lower().split()} & kinds)]
+
+    def _must_ask_gender(self, turn: TurnUnderstanding, asked: int) -> bool:
+        """Never search a category the shop sells in both men's and women's styles without knowing which.
+
+        The prompt asks for this, but the model sometimes skips it; a mixed list is the worst outcome.
+        """
+        need = turn.need
+        if turn.intent not in ("shop", "reject") or not turn.ready_to_search or need.gender or not need.category:
+            return False
+        if asked >= self._settings.elicitation_safety_max_questions:
+            return False
+        return {"men", "women"} <= self._genders(need.category)
+
+    def _genders(self, category: str) -> set[str]:
+        if category not in self._genders_by_category:   # the catalog rarely changes; look once per category
+            try:
+                products = self._catalog.search(SearchQuery(text="", category=category, limit=50))
+                self._genders_by_category[category] = {p.gender for p in products if p.gender}
+            except Exception as error:   # a failed lookup must never block the conversation
+                logger.warning("Could not read genders for %s: %s", category, error)
+                return set()
+        return self._genders_by_category[category]
+
+    def _known_types(self, product_types: list[str]) -> list[str]:
+        """Keep only kinds the catalog really has, in its spelling: a made-up kind would filter out everything."""
+        known = {t.lower(): t for t in self._catalog.product_types()}
+        if not known:
+            return product_types
+        return list(dict.fromkeys(known[t.strip().lower()] for t in product_types if t.strip().lower() in known))
+
+    @staticmethod
     def _parse(llm_response: LlmResponse) -> Optional[TurnUnderstanding]:
         if llm_response.partial or not llm_response.content or not llm_response.content.parts:
             return None
@@ -248,6 +341,28 @@ class ElicitationAgentBuilder:
         except (json.JSONDecodeError, ValidationError) as error:
             logger.warning("Elicitation output could not be parsed: %s", error)
             return None
+
+
+def _text_of(content) -> str:
+    if not content or not content.parts:
+        return ""
+    return " ".join(part.text for part in content.parts if part.text)
+
+
+def _with_colours(must_have: list[str], colours: list[str]) -> list[str]:
+    """A colour the shopper names is always a must-have (the model sometimes leaves it out); a newly
+    named colour replaces the old one ("blue ones instead"), other must-haves stay."""
+    if not colours:
+        return list(dict.fromkeys(must_have))
+    others = [term for term in must_have if term.lower() not in COLOURS]
+    return list(dict.fromkeys(others + colours))[:8]
+
+
+def _gender_question(need: ShoppingNeed) -> str:
+    kind = " or ".join(need.product_types) or need.category or "items"
+    if not kind.endswith("s"):
+        kind = kind[:-1] + "ies" if kind.endswith("y") else kind + "s"
+    return f"Happy to help! Should I look at men's or women's {kind}?"
 
 
 def _presented_products(state) -> str:
