@@ -21,43 +21,22 @@ Environment variables:
   SCOUT_EXPORT_BUCKET         e.g. scout-hackathon-catalog
   SCOUT_EXPORT_OBJECT         optional, default search/catalog.jsonl
 
-Install:
-  pip install "cloud-sql-python-connector[pg8000]" google-cloud-secret-manager google-cloud-storage
+Install: see pipeline/common.py, plus google-cloud-storage
 """
 
 import json
 import os
-import sys
 from dataclasses import dataclass
 from datetime import date, datetime
 from decimal import Decimal
 
-from google.cloud import secretmanager, storage
-from google.cloud.sql.connector import Connector
+from google.cloud import storage
 
-from dotenv import load_dotenv
-
-load_dotenv()
-
-
-# ---------------------------------------------------------------------
-# Settings
-# ---------------------------------------------------------------------
-
-def _require_env(name: str) -> str:
-    value = os.environ.get(name, "").strip()
-    if not value:
-        sys.exit(f"Missing environment variable: {name}")
-    return value
+from common import CloudSqlDatabase, PipelineSettings, require_env
 
 
 @dataclass(frozen=True)
 class ExportSettings:
-    project_id: str
-    db_instance: str
-    db_name: str
-    db_user: str
-    db_password_secret: str
     bucket: str
     object_path: str
     review_excerpts_per_product: int = 3
@@ -65,51 +44,8 @@ class ExportSettings:
 
     @classmethod
     def from_env(cls) -> "ExportSettings":
-        return cls(
-            project_id=_require_env("GOOGLE_CLOUD_PROJECT"),
-            db_instance=_require_env("SCOUT_DB_INSTANCE"),
-            db_name=_require_env("SCOUT_DB_NAME"),
-            db_user=_require_env("SCOUT_DB_USER"),
-            db_password_secret=_require_env("SCOUT_DB_PASSWORD_SECRET"),
-            bucket=_require_env("SCOUT_EXPORT_BUCKET"),
-            object_path=os.environ.get("SCOUT_EXPORT_OBJECT", "search/catalog.jsonl"),
-        )
-
-
-# ---------------------------------------------------------------------
-# Database connection (only knows how to connect)
-# ---------------------------------------------------------------------
-
-class CloudSqlDatabase:
-    """Opens a Cloud SQL connection with the password from Secret Manager."""
-
-    def __init__(self, settings: ExportSettings):
-        self._settings = settings
-        self._connector = None
-        self._connection = None
-
-    def __enter__(self):
-        self._connector = Connector()
-        self._connection = self._connector.connect(
-            self._settings.db_instance,
-            "pg8000",
-            user=self._settings.db_user,
-            password=self._read_password(),
-            db=self._settings.db_name,
-        )
-        return self._connection
-
-    def __exit__(self, *exc):
-        if self._connection:
-            self._connection.close()
-        if self._connector:
-            self._connector.close()
-
-    def _read_password(self) -> str:
-        client = secretmanager.SecretManagerServiceClient()
-        name = (f"projects/{self._settings.project_id}/secrets/"
-                f"{self._settings.db_password_secret}/versions/latest")
-        return client.access_secret_version(name=name).payload.data.decode("UTF-8").strip()
+        return cls(bucket=require_env("SCOUT_EXPORT_BUCKET"),
+                   object_path=os.environ.get("SCOUT_EXPORT_OBJECT", "").strip() or "search/catalog.jsonl")
 
 
 # ---------------------------------------------------------------------
@@ -303,14 +239,15 @@ class CatalogExporter:
 
 
 def main() -> None:
-    settings = ExportSettings.from_env()
-    with CloudSqlDatabase(settings) as connection:
+    pipeline = PipelineSettings.from_env()
+    export = ExportSettings.from_env()
+    with CloudSqlDatabase(pipeline) as connection:
         exporter = CatalogExporter(
-            reader=CatalogReader(connection, settings.review_excerpts_per_product),
-            builder=SearchDocumentBuilder(settings.max_excerpt_chars),
-            uploader=GcsUploader(settings.project_id),
+            reader=CatalogReader(connection, export.review_excerpts_per_product),
+            builder=SearchDocumentBuilder(export.max_excerpt_chars),
+            uploader=GcsUploader(pipeline.project_id),
         )
-        exporter.run(settings.bucket, settings.object_path)
+        exporter.run(export.bucket, export.object_path)
 
 
 if __name__ == "__main__":

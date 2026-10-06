@@ -55,10 +55,6 @@ class CatalogRepository(ABC):
         """Best-matching products for the query, most relevant first."""
 
     @abstractmethod
-    def get_product(self, product_id: str) -> Optional[Product]:
-        """One product by id, or None if it does not exist."""
-
-    @abstractmethod
     def categories(self) -> list[str]:
         """Categories present in the catalog, so agents never hard-code them."""
 

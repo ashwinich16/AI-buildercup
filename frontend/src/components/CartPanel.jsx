@@ -1,6 +1,4 @@
-function price(value) {
-  return value == null ? "Price not listed" : `$${value.toFixed(2)}`;
-}
+import { formatPrice } from "../format.js";
 
 export default function CartPanel({ cart, busy, onAsk }) {
   const items = cart.items || [];
@@ -19,7 +17,7 @@ export default function CartPanel({ cart, busy, onAsk }) {
             {items.map((item, index) => (
               <li key={item.product_id} className="cart__item">
                 <span className="cart__name">{item.name}</span>
-                <span className="cart__price">{price(item.price)}</span>
+                <span className="cart__price">{formatPrice(item.price)}</span>
                 <button
                   className="button button--quiet button--small"
                   disabled={busy}

@@ -19,7 +19,6 @@ current message plus a compact state (need so far, last question, questions
 asked), which keeps every call small.
 """
 
-import json
 import logging
 from typing import Literal, Optional
 
@@ -29,18 +28,19 @@ from google.adk.agents.readonly_context import ReadonlyContext
 from google.adk.models import LlmResponse
 from google.adk.planners import BuiltInPlanner
 from google.genai import types
-from pydantic import BaseModel, Field, ValidationError
+from pydantic import BaseModel, Field
 
 from scout.agents import state_keys
+from scout.agents.model_io import content_text, response_json
 from scout.catalog import CatalogRepository, SearchQuery
 from scout.config import Settings
-from scout.domain import COLOURS, PreferenceProfile, Product, ShoppingNeed, colours_wanted, gender_in_words
-from scout.tools.cart import Cart
+from scout.domain import ShoppingNeed
 from scout.tools.retrieval import word_stems
 
 logger = logging.getLogger(__name__)
 
 MAX_OUTPUT_TOKENS = 4096   # thinking + the JSON answer
+GENDER_STYLES = ("men", "women")   # the styles ShoppingNeed.gender can name
 
 Intent = Literal[
     "shop",               # describing or refining what they want
@@ -129,8 +129,9 @@ FOR THE SHOPPER'S NEW MESSAGE
    - other: anything else.
 
 2. need: return the COMPLETE updated need. Keep everything already known; add or change only what this message says. Never invent details. category must be one of the catalog categories, or null. When the shopper names a kind of product, use the categories in WHAT THE SHOP ACTUALLY HAS as a strong hint for which catalog category it belongs to.
-   product_types: the specific kind(s) they want, spelled exactly as in PRODUCT TYPES IN THE SHOP. Fill it only when their words clearly mean one kind: a button-up, collared, dress, flannel or Hawaiian shirt is "shirt"; a tee is "t-shirt". A word that people use for several kinds (the plain word "shirt", which many people also use for tees and other tops, or "a top", or "shoes") leaves product_types empty. When they accept another kind you offered, add it.
-   gender: whose STYLE the item is, and only from what the shopper says. Naming the style, or naming the person it is for (a husband, a daughter, a brother), settles it; saying it does not matter means "any". Never infer it from their name, voice, way of talking, profile, or from who is talking: an item "for me" or "for myself" does NOT settle it, because anyone can shop for any style. When they move on to a different kind of product, keep the gender only if they make clear it is for the same person.
+   product_types: the specific kind(s) they want, spelled exactly as in PRODUCT TYPES IN THE SHOP. Fill it only when their words clearly mean one of those kinds. A general word that people use for several of the shop's kinds leaves product_types empty. When they accept another kind you offered, add it.
+   gender: whose STYLE the item is, and only from what the shopper says. Naming the style, or naming the person it is for, settles it; saying it does not matter means "any". Never infer it from their name, voice, way of talking, profile, or from who is talking: an item they want for themselves does NOT settle it, because anyone can shop for any style. When they move on to a different kind of product, keep the gender only if they make clear it is for the same person.
+   must_have: every specific quality they ask the product to have, in plain words a product description would use. When they ask for a different value of a quality they already gave, it replaces the old one.
 
 3. Decide whether the need is clear. Think about it like a friend would:
    - Imagine searching right now. Would one more answer clearly change WHICH products you would pick? If yes, it is still unclear. If it would only fine-tune the choice, it is clear enough.
@@ -206,7 +207,7 @@ class ElicitationAgentBuilder:
     # ADK calls this before every model call to build the system instruction.
     def _instruction(self, context: ReadonlyContext) -> str:
         state = context.state
-        need = ShoppingNeed.model_validate(state.get(state_keys.NEED) or {})
+        need = state_keys.need(state)
         return INSTRUCTION.format(
             categories=", ".join(self._catalog.categories()) or "unknown",
             product_types=", ".join(self._catalog.product_types()) or "unknown",
@@ -215,8 +216,8 @@ class ElicitationAgentBuilder:
             questions_asked=state.get(state_keys.QUESTIONS_ASKED, 0),
             catalog_overview=state.get(state_keys.CATALOG_OVERVIEW) or "not available",
             presented=_presented_products(state),
-            profile=PreferenceProfile.model_validate(state.get(state_keys.PREFERENCES) or {}).to_prompt_text(),
-            cart=Cart.model_validate(state.get(state_keys.CART) or {}).to_prompt_text(),
+            profile=state_keys.profile(state).to_prompt_text(),
+            cart=state_keys.cart(state).to_prompt_text(),
         )
 
     # ADK calls this after the model answers; the agent keeps its own state up to date.
@@ -224,11 +225,11 @@ class ElicitationAgentBuilder:
         if llm_response.partial:
             return None
         state = callback_context.state
-        turn = self._parse(llm_response)
+        turn = response_json(llm_response, TurnUnderstanding)
         if turn is None:   # broken or cut-off answer: keep what we knew and ask again, never crash the turn
             turn = TurnUnderstanding(
                 intent="other",
-                need=ShoppingNeed.model_validate(state.get(state_keys.NEED) or {}),
+                need=state_keys.need(state),
                 ready_to_search=False,
                 understood="",
                 reply="Sorry, I lost track for a second there. Could you say that once more?",
@@ -250,13 +251,8 @@ class ElicitationAgentBuilder:
 
         turn.need.product_types = self._known_types(turn.need.product_types)
         turn.need.gender = self._kept_gender(state, turn.need)
-        message = _text_of(callback_context.user_content)
+        message = content_text(callback_context.user_content, separator=" ")
         turn.need.avoid = self._grounded_avoid(state, turn, message)
-        if turn.intent in ("shop", "reject"):
-            turn.need.must_have = _with_colours(turn.need.must_have, colours_wanted(message))
-        said = gender_in_words(message)
-        if said and turn.intent in ("shop", "reject"):
-            turn.need.gender = said              # their own words win over the model's reading
         if self._must_ask_gender(turn, asked):
             logger.info("Need has no gender for %r; asking before searching.", turn.need.category)
             turn.ready_to_search = False
@@ -278,7 +274,7 @@ class ElicitationAgentBuilder:
 
         A new category may be for someone else, so there the model's answer stands (it asks again).
         """
-        previous = ShoppingNeed.model_validate(state.get(state_keys.NEED) or {})
+        previous = state_keys.need(state)
         if need.gender is None and previous.gender and previous.category == need.category:
             return previous.gender
         return need.gender
@@ -287,20 +283,19 @@ class ElicitationAgentBuilder:
         """Things to avoid hide products, so each one must come from the shopper: their words now (or their
         reason for rejecting), their saved profile, or an earlier turn. The model sometimes fills `avoid`
         with features of products it just showed ("denim" for jeans!), which would hide good matches."""
-        previous = {t.lower() for t in ShoppingNeed.model_validate(state.get(state_keys.NEED) or {}).avoid}
-        profile = {p.value.lower() for p in PreferenceProfile.model_validate(state.get(state_keys.PREFERENCES) or {})
-                   .preferences if p.polarity == "avoid"}
+        previous = {t.lower() for t in state_keys.need(state).avoid}
+        profile = {p.value.lower() for p in state_keys.profile(state).preferences if p.polarity == "avoid"}
         said = word_stems(f"{message} {turn.reason or ''}")
         kept = [term for term in self._qualities_only(turn.need)
                 if term.lower() in previous | profile or word_stems(term) & said]
         return list(dict.fromkeys(kept))
 
     def _qualities_only(self, need: ShoppingNeed) -> list[str]:
-        """`avoid` is for qualities ("leather", "tight fit"). Switching from women's to men's jeans is not
-        "avoid women's jeans": that would hide products for the wrong reason, so such entries are dropped."""
-        kinds = {k.lower() for k in [*self._catalog.categories(), *self._catalog.product_types()]}
-        return [term for term in need.avoid
-                if not gender_in_words(term) and not ({w.strip("'s") for w in term.lower().split()} & kinds)]
+        """`avoid` is for qualities. Moving from one person's style or one kind of product to another is not
+        a quality to avoid: it would hide products for the wrong reason, so entries that name a catalog
+        category, kind or style (men / women, the values gender takes) as whole words are dropped."""
+        names = [*self._catalog.categories(), *self._catalog.product_types(), *GENDER_STYLES]
+        return [term for term in need.avoid if not any(_whole_words(name) <= _whole_words(term) for name in names)]
 
     def _must_ask_gender(self, turn: TurnUnderstanding, asked: int) -> bool:
         """Never search a category the shop sells in both men's and women's styles without knowing which.
@@ -331,53 +326,44 @@ class ElicitationAgentBuilder:
             return product_types
         return list(dict.fromkeys(known[t.strip().lower()] for t in product_types if t.strip().lower() in known))
 
-    @staticmethod
-    def _parse(llm_response: LlmResponse) -> Optional[TurnUnderstanding]:
-        if llm_response.partial or not llm_response.content or not llm_response.content.parts:
-            return None
-        text = "".join(part.text or "" for part in llm_response.content.parts if not part.thought)
-        try:
-            return TurnUnderstanding.model_validate(json.loads(text))
-        except (json.JSONDecodeError, ValidationError) as error:
-            logger.warning("Elicitation output could not be parsed: %s", error)
-            return None
 
 
-def _text_of(content) -> str:
-    if not content or not content.parts:
-        return ""
-    return " ".join(part.text for part in content.parts if part.text)
+def _whole_words(text: str) -> set[str]:
+    """Lower-case words split on spaces only ("tie-dye" stays one word), without a possessive or plural "s"."""
+    words = set()
+    for word in text.lower().replace("’", "'").split():
+        word = word.removesuffix("'s")
+        words.add(word[:-1] if word.endswith("s") and len(word) > 3 else word)
+    return words
 
 
-def _with_colours(must_have: list[str], colours: list[str]) -> list[str]:
-    """A colour the shopper names is always a must-have (the model sometimes leaves it out); a newly
-    named colour replaces the old one ("blue ones instead"), other must-haves stay."""
-    if not colours:
-        return list(dict.fromkeys(must_have))
-    others = [term for term in must_have if term.lower() not in COLOURS]
-    return list(dict.fromkeys(others + colours))[:8]
+def read_turn(state) -> Optional[TurnUnderstanding]:
+    """The latest TurnUnderstanding stored in session state (ADK may store it as a JSON string)."""
+    raw = state.get(state_keys.TURN)
+    try:
+        if isinstance(raw, str):
+            return TurnUnderstanding.model_validate_json(raw)
+        return TurnUnderstanding.model_validate(raw) if raw else None
+    except ValueError as error:
+        logger.warning("Could not read the turn understanding: %s", error)
+        return None
 
 
 def _gender_question(need: ShoppingNeed) -> str:
-    kind = " or ".join(need.product_types) or need.category or "items"
-    if not kind.endswith("s"):
-        kind = kind[:-1] + "ies" if kind.endswith("y") else kind + "s"
-    return f"Happy to help! Should I look at men's or women's {kind}?"
+    """Asked only when the model skipped this question; it names the category as the catalog spells it."""
+    kind = " or ".join(need.product_types) or need.category or "this"
+    return f"Happy to help! Is this for a men's or a women's style of {kind}?"
 
 
 def _presented_products(state) -> str:
     """Short numbered list of what Scout last presented, so the model can tell which one is meant."""
-    by_id = {item.get("id"): item for item in state.get(state_keys.SHORTLIST) or []}
-    focus_id = state.get(state_keys.FOCUS_PRODUCT)
+    focus = state_keys.focus(state)
     lines = []
-    for number, product_id in enumerate(state.get(state_keys.PRESENTED) or [], start=1):
-        if product_id not in by_id:
-            continue
-        product = Product.model_validate(by_id[product_id])
+    for number, product in enumerate(state_keys.presented(state), start=1):
         facts = [a.value for a in product.attributes if len(a.value) <= 25][:2]   # short, distinguishing facts
         if product.price is not None:
             facts.append(f"${product.price:.0f}")
         title = " ".join(product.title.split()[:10])
-        marker = "  <- being discussed" if product_id == focus_id else ""
+        marker = "  <- being discussed" if focus and product.id == focus.id else ""
         lines.append(f"{number}. {title} ({', '.join(facts)}){marker}" if facts else f"{number}. {title}{marker}")
     return "\n".join(lines) or "none yet"

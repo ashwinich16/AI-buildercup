@@ -11,12 +11,11 @@ from scout.domain import ShoppingNeed
 from scout.tools import ProductRetriever
 
 SAMPLE_NEEDS = [
-    ShoppingNeed(category="top", product_types=["shirt"], gender="men", looking_for="relaxed but smart shirt",
-                 purpose="beach wedding", budget_max=50),
-    ShoppingNeed(category="top", product_types=["shirt"], gender="women", looking_for="casual shirt"),
-    ShoppingNeed(category="jeans", gender="men", looking_for="slim fit jeans"),
-    ShoppingNeed(category="bag", looking_for="leather tote", purpose="work", avoid=["black"]),
-    ShoppingNeed(category="shoe", looking_for="comfortable walking shoes", budget_max=5),   # forces relaxing
+    ShoppingNeed(category="shirt", gender="men", looking_for="formal shirt for the office", budget_max=50),
+    ShoppingNeed(category="trousers", gender="women", looking_for="tailored work trousers"),
+    ShoppingNeed(category="bag", looking_for="laptop bag for work", avoid=["black"]),
+    ShoppingNeed(category="accessory", gender="men", looking_for="tie for a business suit"),
+    ShoppingNeed(category="shoe", looking_for="comfortable office shoes", budget_max=5),   # forces relaxing
 ]
 
 

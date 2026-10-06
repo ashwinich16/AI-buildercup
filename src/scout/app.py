@@ -11,7 +11,6 @@ from scout.agents.comparison import ComparisonAgentBuilder
 from scout.agents.elicitation import ElicitationAgentBuilder
 from scout.agents.narration import NarrationAgentBuilder
 from scout.agents.orchestrator import ScoutOrchestrator
-from scout.agents.orchestrator.agent import PRODUCTS_TO_PRESENT
 from scout.agents.preference import PreferenceAgentBuilder
 from scout.agents.product_expert import ProductExpertAgentBuilder
 from scout.catalog import CatalogRepository
@@ -30,7 +29,7 @@ def build_root_agent(settings: Settings | None = None, catalog: CatalogRepositor
     images = ImageFetcher()                  # shared, so photos downloaded once are reused by every agent
     return ScoutOrchestrator(
         elicitation=ElicitationAgentBuilder(settings, catalog).build(),
-        narration=NarrationAgentBuilder(settings, options_to_present=PRODUCTS_TO_PRESENT).build(),
+        narration=NarrationAgentBuilder(settings).build(),
         product_expert=ProductExpertAgentBuilder(settings, images).build(),
         comparison=ComparisonAgentBuilder(settings, images).build(),
         preference=PreferenceAgentBuilder(settings).build(),

@@ -46,7 +46,7 @@ const ECHO_TAIL_MS = 1200;
 // Listening: the browser's speech recognition, kept open for the whole conversation
 // (no start-up delay between turns). It restarts itself if the browser closes it.
 // `language` is the shopper's accent/language, e.g. "en-IN", "hi-IN".
-export function useSpeechInput({ language, onInterim, onFinal, onReady }) {
+export function useSpeechInput({ language, onInterim, onFinal }) {
   const Recognition =
     typeof window !== "undefined" && (window.SpeechRecognition || window.webkitSpeechRecognition);
   const [active, setActive] = useState(false); // the shopper wants Scout to listen
@@ -61,7 +61,7 @@ export function useSpeechInput({ language, onInterim, onFinal, onReady }) {
   const languageRef = useRef(language);
   languageRef.current = language;
   const handlers = useRef({});
-  handlers.current = { onInterim, onFinal, onReady };
+  handlers.current = { onInterim, onFinal };
 
   launchRef.current = () => {
     if (!Recognition || recognitionRef.current || !activeRef.current) return;
@@ -70,10 +70,7 @@ export function useSpeechInput({ language, onInterim, onFinal, onReady }) {
     recognition.continuous = true;
     recognition.interimResults = true;
 
-    recognition.onaudiostart = () => {
-      setHearing(true);
-      handlers.current.onReady?.();
-    };
+    recognition.onaudiostart = () => setHearing(true);
     recognition.onresult = (event) => {
       let interimText = "";
       for (let i = event.resultIndex; i < event.results.length; i += 1) {
@@ -147,9 +144,8 @@ export function useSpeechInput({ language, onInterim, onFinal, onReady }) {
 const FIRST_CHUNK_MIN_WORDS = 4;   // "Oh!" alone is too short to be worth its own request
 const LATER_CHUNK_CHARS = 150;     // later chunks: a couple of sentences each
 
-// Markdown the model sometimes writes (**bold**, bullets) must not be read out.
-const forSpeech = (text) =>
-  (text || "").replace(/[*_#`>]+/g, "").replace(/^\s*[-•]\s+/gm, "").replace(/\s+/g, " ").trim();
+// The backend already removes formatting symbols from Scout's replies; here only spacing is tidied.
+const forSpeech = (text) => (text || "").replace(/\s+/g, " ").trim();
 
 // Where the complete sentences in `text` end: after . ! ? followed by a space ("$12.99" stays whole).
 function completeSentencesEnd(text) {

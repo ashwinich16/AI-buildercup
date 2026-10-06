@@ -22,8 +22,6 @@ from google.genai import types
 from scout.agents import state_keys
 from scout.agents.voice import VOICE
 from scout.config import Settings
-from scout.domain import PreferenceProfile, Product, ShoppingNeed
-from scout.tools.cart import Cart
 from scout.tools.review_evidence import EvidencePicker
 
 _EVIDENCE = EvidencePicker()
@@ -53,7 +51,7 @@ YOUR TASK
 Present these options in about 80 to 120 words:
 1. Start with a short, natural reaction.
 2. Be honest about matches. Options marked [exact match] have everything they asked for. Options marked [related] do not: say so plainly and kindly, name what they lack, and say what they DO offer for this shopper's need.
-3. Lead with the best option and WHY it suits what they want, plus one detail that helps them picture it. Back the why with ONE short quote from its review evidence, said naturally with how many reviews say it (for example, that three of ten reviewers say it fits perfectly). Quote only the evidence given, word for word.
+3. Lead with the best option and WHY it suits what they want, plus one detail that helps them picture it. Back the why with ONE short quote from its review evidence, said naturally together with how many of the reviews say it. Quote only the evidence given, word for word.
 4. Then each other option in one sentence, with the one way it differs.
 5. Mention a review point only if it matters for their need.
 6. Make the order clear as you speak (first, second...) so they can refer back.
@@ -128,9 +126,8 @@ Then offer ONE useful next step. Never invent items or prices.
 class NarrationAgentBuilder:
     """Builds the Narration LlmAgent. One prompt builder per NarrationTask."""
 
-    def __init__(self, settings: Settings, options_to_present: int = 3):
+    def __init__(self, settings: Settings):
         self._settings = settings
-        self._options_to_present = options_to_present
         self._prompts: dict[NarrationTask, Callable[[dict], str]] = {
             NarrationTask.PRESENT_OPTIONS: self._present_options_prompt,
             NarrationTask.MORE_OPTIONS: self._more_options_prompt,
@@ -164,8 +161,8 @@ class NarrationAgentBuilder:
     def _present_options_prompt(self, state: dict) -> str:
         return PRESENT_OPTIONS.format(
             voice=VOICE,
-            need=_need(state).summary(),
-            profile=PreferenceProfile.model_validate(state.get(state_keys.PREFERENCES) or {}).to_prompt_text(),
+            need=state_keys.need(state).summary(),
+            profile=state_keys.profile(state).to_prompt_text(),
             search_note=_search_note(state),
             products=_presented_text(state),
         )
@@ -175,7 +172,7 @@ class NarrationAgentBuilder:
         already = max(len(state.get(state_keys.SEEN) or []) - len(presented), 0)
         return MORE_OPTIONS.format(
             voice=VOICE,
-            need=_need(state).summary(),
+            need=state_keys.need(state).summary(),
             already_heard=already,
             search_note=_search_note(state),
             products=_presented_text(state),
@@ -185,7 +182,7 @@ class NarrationAgentBuilder:
         other_types = state.get(state_keys.OTHER_TYPES) or []
         return NO_MORE_OPTIONS.format(
             voice=VOICE,
-            need=_need(state).summary(),
+            need=state_keys.need(state).summary(),
             already_heard=len(state.get(state_keys.SEEN) or []),
             other_kinds=f"Other kinds the shop has for them: {', '.join(other_types)}.\n" if other_types else "",
         )
@@ -193,32 +190,25 @@ class NarrationAgentBuilder:
     def _speak_comparison_prompt(self, state: dict) -> str:
         comparison = state.get(state_keys.COMPARISON)
         text = json.dumps(comparison, ensure_ascii=False, indent=1) if comparison else "No comparison available."
-        return SPEAK_COMPARISON.format(voice=VOICE, need=_need(state).summary(), comparison=text)
+        return SPEAK_COMPARISON.format(voice=VOICE, need=state_keys.need(state).summary(), comparison=text)
 
     def _cart_update_prompt(self, state: dict) -> str:
         return CART_UPDATE.format(
             voice=VOICE,
             event=json.dumps(state.get(state_keys.CART_EVENT) or {}, ensure_ascii=False),
-            cart=Cart.model_validate(state.get(state_keys.CART) or {}).to_prompt_text(),
+            cart=state_keys.cart(state).to_prompt_text(),
         )
-
-
-def _need(state: dict) -> ShoppingNeed:
-    return ShoppingNeed.model_validate(state.get(state_keys.NEED) or {})
 
 
 def _presented_text(state: dict) -> str:
     """The products chosen for this turn, each labelled exact or related."""
-    by_id = {item.get("id"): item for item in state.get(state_keys.SHORTLIST) or []}
-    exact = set(state.get(state_keys.EXACT_MATCHES) or [])
+    need = state_keys.need(state)
     blocks = []
-    for number, product_id in enumerate(state.get(state_keys.PRESENTED) or [], start=1):
-        if product_id in by_id:
-            label = "[exact match]" if product_id in exact else "[related]"
-            product = Product.model_validate(by_id[product_id])
-            evidence = _EVIDENCE.pick(product, _need(state))
-            proof = ("\nReview evidence (real quotes): " + "; ".join(e.as_text() for e in evidence)) if evidence else ""
-            blocks.append(f"Option {number} {label}:\n{product.to_prompt_text()}{proof}")
+    for number, product in enumerate(state_keys.presented(state), start=1):
+        label = "[exact match]" if state_keys.is_exact(state, product.id) else "[related]"
+        evidence = _EVIDENCE.pick(product, need)
+        proof = ("\nReview evidence (real quotes): " + "; ".join(e.as_text() for e in evidence)) if evidence else ""
+        blocks.append(f"Option {number} {label}:\n{product.to_prompt_text()}{proof}")
     return "\n\n".join(blocks) or "None."
 
 
@@ -243,6 +233,6 @@ def _search_note(state: dict) -> str:
 
 
 def _kind(state: dict) -> str:
-    need = _need(state)
+    need = state_keys.need(state)
     kind = " or ".join(need.product_types) or need.category or "items"
     return f"{need.gender_filter()}'s {kind}" if need.gender_filter() else kind

@@ -19,18 +19,13 @@ Run:
 """
 
 import json
-import os
 import re
-import sys
-from pathlib import Path
 from typing import Literal, Optional
 
-import requests
-from google import genai
 from google.genai import types
 from pydantic import BaseModel
 
-sys.path.insert(0, str(Path(__file__).resolve().parent))
+from common import CloudSqlDatabase, Gemini, PipelineSettings, image_part
 
 Gender = Literal["men", "women", "unisex"]
 
@@ -98,10 +93,8 @@ Features: {features}
 
 
 class GeminiGenderClassifier:
-    def __init__(self, project_id: str):
-        self._client = genai.Client(vertexai=True, project=project_id,
-                                    location=os.environ.get("GOOGLE_CLOUD_LOCATION", "us-central1"))
-        self._model = os.environ.get("SCOUT_ENRICH_MODEL", "gemini-2.5-flash")
+    def __init__(self, gemini: Gemini):
+        self._gemini = gemini
 
     def classify(self, product: dict, image_url: Optional[str]) -> GenderAnswer:
         parts = [types.Part.from_text(text=PROMPT.format(
@@ -110,31 +103,10 @@ class GeminiGenderClassifier:
             description=" ".join(product["description"] or [])[:1500],
             features=" | ".join(product["features"] or [])[:1500],
         ))]
-        image = self._fetch(image_url)
+        image = image_part(image_url)
         if image:
             parts.append(image)
-        response = self._client.models.generate_content(
-            model=self._model,
-            contents=[types.Content(role="user", parts=parts)],
-            config=types.GenerateContentConfig(
-                temperature=0.0,
-                response_mime_type="application/json",
-                response_schema=GenderAnswer,
-            ),
-        )
-        return GenderAnswer.model_validate_json(response.text)
-
-    @staticmethod
-    def _fetch(url: Optional[str]) -> Optional[types.Part]:
-        if not url:
-            return None
-        try:
-            response = requests.get(url, timeout=15)
-            response.raise_for_status()
-            mime = response.headers.get("Content-Type", "image/jpeg").split(";")[0]
-            return types.Part.from_bytes(data=response.content, mime_type=mime)
-        except requests.RequestException:
-            return None   # the text alone is usually enough
+        return self._gemini.answer(parts, GenderAnswer)
 
 
 # ---------------------------------------------------------------------
@@ -142,11 +114,9 @@ class GeminiGenderClassifier:
 # ---------------------------------------------------------------------
 
 def main():
-    import ingestion   # here, not at the top: ingestion imports this module for its rules
-
-    conn, connector = ingestion.get_connection()
-    cursor = conn.cursor()
-    try:
+    settings = PipelineSettings.from_env()
+    with CloudSqlDatabase(settings) as conn:
+        cursor = conn.cursor()
         cursor.execute(ADD_COLUMN_SQL)
         conn.commit()
 
@@ -173,7 +143,7 @@ def main():
         print(f"Labelled {from_listing} from the listing; asking Gemini about {len(unresolved)}.")
 
         if unresolved:
-            classifier = GeminiGenderClassifier(ingestion.PROJECT_ID)
+            classifier = GeminiGenderClassifier(Gemini(settings))
             for number, product in enumerate(unresolved, start=1):
                 try:
                     answer = classifier.classify(product, product["image_url"])
@@ -190,10 +160,6 @@ def main():
         print("\ncategory   gender   products")
         for category, gender, count in cursor.fetchall():
             print(f"{category:<10} {gender or '-':<8} {count:>8}")
-    finally:
-        cursor.close()
-        conn.close()
-        connector.close()
 
 
 if __name__ == "__main__":

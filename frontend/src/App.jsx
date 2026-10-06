@@ -10,6 +10,8 @@ import ProductList from "./components/ProductList.jsx";
 import CartPanel from "./components/CartPanel.jsx";
 
 const EMPTY_SCREEN = { products: [], cart: { items: [], total: 0 }, focus_product_id: null };
+// What to show, from any API response that carries it (session start, streamed screen, end of turn).
+const screenOf = ({ products, cart, focus_product_id }) => ({ products, cart, focus_product_id });
 const DEFAULT_SETTINGS = {
   voice: true, rate: 1, language: "en-IN", highContrast: false, largeText: false, headphones: false,
 };
@@ -104,7 +106,7 @@ export default function App() {
             showReply(soFar);
             voice?.push(item.text);
           } else if (item.type === "screen" || item.type === "done") {
-            setScreen({ products: item.products, cart: item.cart, focus_product_id: item.focus_product_id });
+            setScreen(screenOf(item));
           }
         });
         if (turn.action === "pause") {
@@ -174,7 +176,7 @@ export default function App() {
       sessionRef.current = started.session_id;
       setShopper({ ...signedIn, name: started.shopper_name || signedIn.name });
       setSessionId(started.session_id);
-      setScreen({ products: started.products, cart: started.cart, focus_product_id: started.focus_product_id });
+      setScreen(screenOf(started));
       voiceInput.start(); // signing in is the click browsers need before using the microphone
       scoutSays(started.greeting);
     } catch (error) {

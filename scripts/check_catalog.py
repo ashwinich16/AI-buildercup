@@ -7,7 +7,7 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "pipeline"))
-import ingestion  # noqa: E402  (reuses its Cloud SQL connection settings)
+from common import CloudSqlDatabase, PipelineSettings  # noqa: E402  (the pipeline's Cloud SQL connection)
 
 SQL = """
 SELECT p.category,
@@ -25,16 +25,12 @@ ORDER BY p.category;
 
 
 def main():
-    conn, connector = ingestion.get_connection()
-    try:
+    with CloudSqlDatabase(PipelineSettings.from_env()) as conn:
         cursor = conn.cursor()
         cursor.execute(SQL)
         print(f"{'category':<10} {'products':>8} {'images':>7} {'reviews':>8} {'enriched':>9}")
         for category, products, images, reviews, enriched in cursor.fetchall():
             print(f"{category or '-':<10} {products:>8} {images:>7} {reviews:>8} {enriched:>9}")
-    finally:
-        conn.close()
-        connector.close()
 
 
 if __name__ == "__main__":

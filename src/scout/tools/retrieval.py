@@ -21,12 +21,13 @@ It depends only on the CatalogRepository interface, so any catalog works.
 
 import re
 from collections import Counter
-from typing import Optional
+from functools import cache
+from typing import Callable, Optional
 
 from pydantic import BaseModel, Field
 
 from scout.catalog import CatalogRepository, SearchQuery
-from scout.domain import COLOURS, Product, ShoppingNeed
+from scout.domain import Product, ShoppingNeed
 
 
 class RetrievalResult(BaseModel):
@@ -51,6 +52,7 @@ class ProductRetriever:
     def find(self, need: ShoppingNeed, exclude_ids: Optional[set[str]] = None) -> RetrievalResult:
         """Exact matches first, topped up with related products. `exclude_ids` skips products already shown."""
         excluded = set(exclude_ids or ())
+        in_catalog = self._recorded_in_catalog(need)   # does the catalog's data record a must-have? (asked lazily)
         collected: list[Product] = []
         exact_ids: list[str] = []
         relaxed_for_rest: list[str] = []
@@ -72,13 +74,14 @@ class ProductRetriever:
                 exact_ids += [p.id for p in hits]
             collected += hits
             # With must-haves (a colour, "stretchy"), keep looking: semantic search ranks, it does not check.
-            if len(collected) >= self._target and (not need.must_have or self._exact_count(collected, need) >= self._few):
+            if len(collected) >= self._target and (
+                    not need.must_have or self._exact_count(collected, need, in_catalog) >= self._few):
                 break
 
         if need.must_have:
-            # Only must-haves that some product states can be checked ("black" can; "soft" rarely is written
-            # down, and must not make every product inexact). Exact = states all checkable ones; best first.
-            checkable = _checkable(need.must_have, collected)
+            # Only must-haves the data can confirm or rule out count: if no product data ever states one,
+            # it can't count against any product. Exact = states all checkable ones; best first.
+            checkable = _checkable(need, collected, in_catalog)
             met = {p.id: sum(has_all(p, [t]) for t in checkable) for p in collected}
             exact_ids = [p.id for p in collected if p.id in within_budget and met[p.id] == len(checkable)]
             collected.sort(key=lambda p: (p.id not in exact_ids, -met[p.id]))   # stable: search order otherwise
@@ -125,9 +128,32 @@ class ProductRetriever:
         return attempts
 
     @staticmethod
-    def _exact_count(products: list[Product], need: ShoppingNeed) -> int:
-        checkable = _checkable(need.must_have, products)
+    def _exact_count(products: list[Product], need: ShoppingNeed, in_catalog: Callable[[str], bool]) -> int:
+        checkable = _checkable(need, products, in_catalog)
         return sum(1 for p in products if has_all(p, checkable)) if checkable else len(products)
+
+    def _recorded_in_catalog(self, need: ShoppingNeed) -> Callable[[str], bool]:
+        """Does the catalog's data record this must-have somewhere: stated by a product in the same category, or
+        a value the catalog records as an attribute of any product (a colour such as "black" even when no black
+        pair of jeans exists)? The answer is kept for the whole search, so the search loop and the final
+        scoring agree, and the catalog is only asked about must-haves no found product already states."""
+        samples: list[list[Product]] = []
+
+        @cache
+        def recorded(term: str) -> bool:
+            if not samples:
+                samples.append(self._catalog.search(
+                    SearchQuery(category=need.category, gender=need.gender_filter(), limit=50)))
+            return any(has_all(p, [term]) for p in samples[0]) or self._recorded_value(term)
+
+        return recorded
+
+    def _recorded_value(self, term: str) -> bool:
+        """Is this the value of some product's attribute anywhere in the catalog?"""
+        stems = word_stems(term)
+        return bool(stems) and any(stems <= word_stems(a.value)
+                                   for p in self._catalog.search(SearchQuery(text=term, limit=20))
+                                   for a in p.attributes)
 
     def _other_types(self, need: ShoppingNeed) -> list[str]:
         """Other kinds of product in the same category for the same person, most common first."""
@@ -158,11 +184,6 @@ class ProductRetriever:
         return kept or products
 
 
-def find_products(retriever: ProductRetriever, need: Optional[dict]) -> RetrievalResult:
-    """Convenience for callers holding the need as a plain dict (e.g. from session state)."""
-    return retriever.find(ShoppingNeed.model_validate(need or {}))
-
-
 def has_all(product: Product, must_have: list[str]) -> bool:
     """Do the product's own facts (title, type, attributes, style, description) mention every must-have?
 
@@ -175,24 +196,32 @@ def has_all(product: Product, must_have: list[str]) -> bool:
     return all(word_stems(term) <= facts for term in must_have if word_stems(term))
 
 
-_FILLER = {"a", "an", "the", "and", "or", "with", "of", "in", "on", "for", "to", "very", "really", "some"}
+# Words of the language that carry no product meaning (articles, prepositions, how people phrase a request),
+# so they are never required to appear in product data. This is about English, not about any catalog.
+_FILLER_WORDS = {"a", "an", "the", "and", "or", "but", "with", "of", "in", "on", "for", "to", "at", "my", "me",
+                 "it", "is", "be", "that", "this", "very", "really", "some", "something", "i", "want", "need",
+                 "looking", "like", "good"}
+
+
+def _checkable(need: ShoppingNeed, products: list[Product], in_catalog: Callable[[str], bool]) -> list[str]:
+    """Must-haves that can count against a product: stated by one of these products, or recorded in the catalog.
+    Something no product data ever records (often a feeling such as "soft") can't count against any product."""
+    return [term for term in need.must_have if any(has_all(p, [term]) for p in products) or in_catalog(term)]
 
 
 def word_stems(text: str) -> set[str]:
+    """The meaningful words of a text, lower-case and without common endings ("stretchy" -> "stretch"), for
+    matching what a shopper says against what product data states. Used by every tool that matches words."""
+    text = (text or "").lower()
+    # Hyphenated words count whole as well as by their parts, so "v-neck" needs "v-neck", not just any "neck".
+    words = re.findall(r"[a-z0-9]+(?:-[a-z0-9]+)+", text) + re.findall(r"[a-z0-9]+", text)
     stems = set()
-    for word in re.findall(r"[a-z0-9]+", (text or "").lower()):
-        if word in _FILLER:
+    for word in words:
+        if word in _FILLER_WORDS or (len(word) < 2 and not word.isdigit()):
             continue
-        for suffix in ("iness", "ness", "ing", "ed", "es", "y", "s"):
+        for suffix in ("iness", "ness", "able", "ing", "ed", "es", "y", "s"):
             if word.endswith(suffix) and len(word) - len(suffix) >= 3:
                 word = word[: -len(suffix)]
                 break
         stems.add(word)
     return stems
-
-
-def _checkable(must_have: list[str], products: list[Product]) -> list[str]:
-    """Must-haves that product data can confirm: colours always (every product records its colour, so "no
-    black one here" is a real answer), anything else only if some product states it ("soft" rarely is)."""
-    return [term for term in must_have
-            if word_stems(term) & COLOURS or any(has_all(p, [term]) for p in products)]

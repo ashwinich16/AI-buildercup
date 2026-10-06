@@ -27,7 +27,6 @@ creates them.
 """
 
 import asyncio
-import json
 import logging
 from typing import AsyncGenerator, Optional
 
@@ -38,10 +37,11 @@ from google.genai import types
 from pydantic import ConfigDict
 
 from scout.agents import state_keys
-from scout.agents.elicitation import TurnUnderstanding
+from scout.agents.elicitation import TurnUnderstanding, read_turn
+from scout.agents.model_io import content_text
 from scout.agents.narration import NarrationTask
-from scout.domain import Product, ShoppingNeed
-from scout.tools import Cart, CatalogOverviewBuilder, ProductReferenceResolver, ProductRetriever
+from scout.domain import Product
+from scout.tools import CatalogOverviewBuilder, ProductReferenceResolver, ProductRetriever
 
 logger = logging.getLogger(__name__)
 
@@ -91,7 +91,7 @@ class ScoutOrchestrator(BaseAgent):
         async for event in self._silently(self.elicitation, ctx):
             yield event
 
-        turn = self._read_turn(ctx)
+        turn = read_turn(ctx.session.state)
         if turn is None:
             yield self._say(ctx, "Sorry, I didn't quite catch that. Could you say it another way?")
             return
@@ -143,7 +143,7 @@ class ScoutOrchestrator(BaseAgent):
 
     async def _search_and_narrate(self, ctx: InvocationContext, skip_seen: bool = False):
         state = ctx.session.state
-        need = ShoppingNeed.model_validate(state.get(state_keys.NEED) or {})
+        need = state_keys.need(state)
         seen = set(state.get(state_keys.SEEN) or []) if skip_seen else set()
         result = await asyncio.to_thread(self.retriever.find, need, seen)
         logger.info("Retrieval for %r found %d (%d exact, relaxed: %s)", result.query_text,
@@ -185,7 +185,7 @@ class ScoutOrchestrator(BaseAgent):
         delta: dict = {}
 
         if len(unseen) < PRODUCTS_TO_PRESENT:        # not enough left: search again, skipping what we have
-            need = ShoppingNeed.model_validate(state.get(state_keys.NEED) or {})
+            need = state_keys.need(state)
             known = set(seen) | {p.get("id") for p in shortlist}
             extra = await asyncio.to_thread(self.retriever.find, need, known)
             if extra.found:
@@ -225,7 +225,7 @@ class ScoutOrchestrator(BaseAgent):
             yield event
 
     async def _compare(self, ctx: InvocationContext, turn: TurnUnderstanding):
-        presented = [p.id for p in self._presented(ctx)]
+        presented = [p.id for p in state_keys.presented(ctx.session.state)]
         if len(presented) < 2:
             yield self._say(ctx, "I need at least two options to compare. Shall I find a few more for you?")
             return
@@ -249,7 +249,7 @@ class ScoutOrchestrator(BaseAgent):
             yield self._say(ctx, "Lovely! Which one would you like: the first, second or third?")
             return
 
-        cart = Cart.model_validate(ctx.session.state.get(state_keys.CART) or {})
+        cart = state_keys.cart(ctx.session.state)
         added = cart.add(product)
         yield self._update_state(ctx, {
             state_keys.CART: cart.model_dump(),
@@ -262,7 +262,7 @@ class ScoutOrchestrator(BaseAgent):
         yield self._evidence("chose", product, turn.reason)
 
     async def _cart(self, ctx: InvocationContext, turn: TurnUnderstanding):
-        cart = Cart.model_validate(ctx.session.state.get(state_keys.CART) or {})
+        cart = state_keys.cart(ctx.session.state)
         action = turn.cart_action or "view"
         event: dict = {"action": action}
 
@@ -292,13 +292,8 @@ class ScoutOrchestrator(BaseAgent):
     # Helpers
     # -----------------------------------------------------------------
 
-    def _presented(self, ctx: InvocationContext) -> list[Product]:
-        state = ctx.session.state
-        by_id = {p.get("id"): p for p in state.get(state_keys.SHORTLIST) or []}
-        return [Product.model_validate(by_id[i]) for i in state.get(state_keys.PRESENTED) or [] if i in by_id]
-
     def _presented_product(self, ctx: InvocationContext, position: Optional[int]) -> Optional[Product]:
-        return self.resolver.resolve(position, self._presented(ctx))
+        return self.resolver.resolve(position, state_keys.presented(ctx.session.state))
 
     @staticmethod
     def _evidence(event: str, product: Optional[Product], reason: Optional[str]) -> str:
@@ -314,8 +309,8 @@ class ScoutOrchestrator(BaseAgent):
         return not state.get(state_keys.PRESENTED) or bool(state.get(state_keys.LAST_QUESTION))
 
     async def _catalog_overview(self, ctx: InvocationContext) -> Optional[str]:
-        need = ShoppingNeed.model_validate(ctx.session.state.get(state_keys.NEED) or {})
-        text = f"{need.search_text()} {_user_text(ctx)}".strip()
+        need = state_keys.need(ctx.session.state)
+        text = f"{need.search_text()} {content_text(ctx.user_content, separator=' ')}".strip()
         if not text:
             return None
         try:   # helpful, not essential: a failed search must never break the conversation
@@ -325,17 +320,6 @@ class ScoutOrchestrator(BaseAgent):
             return overview.to_prompt_text()
         except Exception as error:
             logger.warning("Catalog overview skipped: %s", error)
-            return None
-
-    @staticmethod
-    def _read_turn(ctx: InvocationContext) -> Optional[TurnUnderstanding]:
-        raw = ctx.session.state.get(state_keys.TURN)
-        if isinstance(raw, str):
-            raw = json.loads(raw)
-        try:
-            return TurnUnderstanding.model_validate(raw) if raw else None
-        except ValueError as error:
-            logger.warning("Could not read the turn understanding: %s", error)
             return None
 
     @staticmethod
@@ -362,9 +346,3 @@ class ScoutOrchestrator(BaseAgent):
             actions=EventActions(state_delta=state_delta),
         )
 
-
-def _user_text(ctx: InvocationContext) -> str:
-    content = ctx.user_content
-    if not content or not content.parts:
-        return ""
-    return " ".join(part.text for part in content.parts if part.text)

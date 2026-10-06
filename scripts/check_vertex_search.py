@@ -15,62 +15,33 @@ Configuration comes from environment variables (see .env.example):
   SCOUT_SEARCH_ENGINE_ID       search app (engine) id  -- preferred, or
   SCOUT_SEARCH_DATA_STORE_ID   data store id           -- used if no engine id
 
-Usage:
-  python scripts/check_vertex_search.py "warm jacket for winter"
+Usage (from the repository root, with PYTHONPATH=src):
+  python scripts/check_vertex_search.py "formal shirt for the office"
   python scripts/check_vertex_search.py "office shoes" --filter 'category: ANY("shoe")'
 """
 
 import argparse
 import json
-import os
 import sys
 
 from google.api_core.client_options import ClientOptions
 from google.api_core.exceptions import GoogleAPICallError
 from google.cloud import discoveryengine_v1 as discoveryengine
 from google.protobuf.json_format import MessageToDict
-from dotenv import load_dotenv
 
-load_dotenv()
-
-
-def require_env(name: str) -> str:
-    value = os.environ.get(name, "").strip()
-    if not value:
-        sys.exit(f"Missing environment variable: {name}")
-    return value
-
-
-def build_serving_config(project: str, location: str) -> str:
-    base = f"projects/{project}/locations/{location}/collections/default_collection"
-    engine_id = os.environ.get("SCOUT_SEARCH_ENGINE_ID", "").strip()
-    if engine_id:
-        return f"{base}/engines/{engine_id}/servingConfigs/default_search"
-    data_store_id = require_env("SCOUT_SEARCH_DATA_STORE_ID")
-    return f"{base}/dataStores/{data_store_id}/servingConfigs/default_search"
-
-
-def build_client(location: str) -> discoveryengine.SearchServiceClient:
-    if location == "global":
-        return discoveryengine.SearchServiceClient()
-    endpoint = f"{location}-discoveryengine.googleapis.com"
-    return discoveryengine.SearchServiceClient(client_options=ClientOptions(api_endpoint=endpoint))
+from scout.config import MissingSettingError, get_settings
 
 
 def search(query: str, filter_expr: str, limit: int) -> list[dict]:
-    project = require_env("GOOGLE_CLOUD_PROJECT")
-    location = os.environ.get("SCOUT_SEARCH_LOCATION", "global").strip()
-
+    """Raw documents (no mapping into Product), so every stored field is visible."""
+    settings = get_settings()                 # the same serving config the app uses
+    location = settings.search_location
+    options = None if location == "global" else ClientOptions(api_endpoint=f"{location}-discoveryengine.googleapis.com")
     request = discoveryengine.SearchRequest(
-        serving_config=build_serving_config(project, location),
-        query=query,
-        filter=filter_expr,
-        page_size=limit,
-    )
-    pager = build_client(location).search(request)
+        serving_config=settings.search_serving_config, query=query, filter=filter_expr, page_size=limit)
 
     documents = []
-    for result in pager:
+    for result in discoveryengine.SearchServiceClient(client_options=options).search(request):
         doc = MessageToDict(result.document._pb)
         documents.append({"id": doc.get("id"), "fields": doc.get("structData", {})})
         if len(documents) >= limit:
@@ -110,6 +81,8 @@ def main() -> None:
 
     try:
         print_results(search(args.query, args.filter, args.limit))
+    except MissingSettingError as error:
+        sys.exit(str(error))
     except GoogleAPICallError as error:
         sys.exit(f"Search call failed: {error.message}")
 

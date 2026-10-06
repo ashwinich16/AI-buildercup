@@ -21,9 +21,9 @@ from google.adk.planners import BuiltInPlanner
 from google.genai import types
 
 from scout.agents import state_keys
+from scout.agents.model_io import attach, photo_parts
 from scout.agents.voice import VOICE
 from scout.config import Settings
-from scout.domain import Product, ShoppingNeed
 from scout.tools import ImageFetcher
 
 logger = logging.getLogger(__name__)
@@ -77,45 +77,26 @@ class ProductExpertAgentBuilder:
 
     def _instruction(self, context: ReadonlyContext) -> str:
         state = dict(context.state)
-        product = focus_product(state)
+        product = state_keys.focus(state)
         if product is None:
             return VOICE + "\nThe shopper asked about a product, but it is not clear which one. Ask kindly which option they mean."
 
         presented = state.get(state_keys.PRESENTED) or []
         position = _POSITIONS[presented.index(product.id)] if product.id in presented[:3] else "one of the options"
-        need = ShoppingNeed.model_validate(state.get(state_keys.NEED) or {})
         return PRODUCT_EXPERT.format(
             voice=VOICE,
             position=position,
             product=product.to_prompt_text(detailed=True),
-            need=need.summary(),
+            need=state_keys.need(state).summary(),
         )
 
     # ADK calls this right before the model call: add the product photos to the request.
     def _attach_photos(self, callback_context: CallbackContext, llm_request: LlmRequest) -> Optional[LlmResponse]:
-        product = focus_product(callback_context.state)
+        product = state_keys.focus(callback_context.state)
         if product is None or not product.image_urls:
             return None
-
-        images = self._images.fetch_many(product.image_urls, limit=self._images_per_product)
-        if not images:
+        parts = photo_parts(self._images, product.image_urls, self._images_per_product, "Photos of the product:")
+        if not parts:
             logger.warning("No photos could be loaded for %s; answering from facts only.", product.id)
-            return None
-
-        photo_parts = [types.Part.from_bytes(data=image.data, mime_type=image.mime_type) for image in images]
-        photo_parts.insert(0, types.Part(text=f"Photos of the product ({len(images)}):"))
-        last = llm_request.contents[-1] if llm_request.contents else None
-        if last is not None and last.role == "user":
-            last.parts = list(last.parts or []) + photo_parts     # keep the shopper's question and photos together
-        else:
-            llm_request.contents.append(types.Content(role="user", parts=photo_parts))
+        attach(llm_request, parts)
         return None
-
-
-def focus_product(state) -> Optional[Product]:
-    """The product being discussed, read from the shortlist in session state (any mapping with .get)."""
-    focus_id = state.get(state_keys.FOCUS_PRODUCT)
-    for item in state.get(state_keys.SHORTLIST) or []:
-        if item.get("id") == focus_id:
-            return Product.model_validate(item)
-    return None

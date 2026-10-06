@@ -11,7 +11,6 @@ It sees each product's full facts plus one photo per product, so visual
 differences are judged from the pictures, not guessed.
 """
 
-import json
 import logging
 from typing import Literal, Optional
 
@@ -24,8 +23,9 @@ from google.genai import types
 from pydantic import BaseModel, Field
 
 from scout.agents import state_keys
+from scout.agents.model_io import attach, photo_parts
 from scout.config import Settings
-from scout.domain import PreferenceProfile, Product, ShoppingNeed
+from scout.domain import Product
 from scout.tools import ImageFetcher
 
 logger = logging.getLogger(__name__)
@@ -104,55 +104,30 @@ class ComparisonAgentBuilder:
 
     def _instruction(self, context: ReadonlyContext) -> str:
         state = context.state
-        need = ShoppingNeed.model_validate(state.get(state_keys.NEED) or {})
         products_text = "\n\n".join(
             f"Option {position}:\n{product.to_prompt_text(detailed=True)}"
             for position, product in compared_products(state)
         )
-        profile = PreferenceProfile.model_validate(state.get(state_keys.PREFERENCES) or {})
-        return INSTRUCTION.format(need=need.summary(), profile=profile.to_prompt_text(),
+        return INSTRUCTION.format(need=state_keys.need(state).summary(),
+                                  profile=state_keys.profile(state).to_prompt_text(),
                                   products=products_text or "None.")
 
     def _attach_photos(self, callback_context: CallbackContext, llm_request: LlmRequest) -> Optional[LlmResponse]:
-        if self._images_per_product <= 0:
-            return None
         parts: list[types.Part] = []
         for position, product in compared_products(callback_context.state):
-            images = self._images.fetch_many(product.image_urls, limit=self._images_per_product)
-            if images:
-                parts.append(types.Part(text=f"Photo of option {position}:"))
-                parts += [types.Part.from_bytes(data=i.data, mime_type=i.mime_type) for i in images]
-        if not parts:
-            return None
-        last = llm_request.contents[-1] if llm_request.contents else None
-        if last is not None and last.role == "user":
-            last.parts = list(last.parts or []) + parts
-        else:
-            llm_request.contents.append(types.Content(role="user", parts=parts))
+            parts += photo_parts(self._images, product.image_urls, self._images_per_product,
+                                 f"Photo of option {position}:")
+        attach(llm_request, parts)
         return None
 
 
 def compared_products(state) -> list[tuple[int, Product]]:
     """(option number as presented, product) for the products chosen for comparison."""
-    by_id = {item.get("id"): item for item in state.get(state_keys.SHORTLIST) or []}
+    shortlist = state_keys.shortlist(state)
     presented = state.get(state_keys.PRESENTED) or []
     result = []
     for product_id in state.get(state_keys.COMPARE_IDS) or []:
-        if product_id in by_id:
+        if product_id in shortlist:
             position = presented.index(product_id) + 1 if product_id in presented else len(result) + 1
-            result.append((position, Product.model_validate(by_id[product_id])))
+            result.append((position, shortlist[product_id]))
     return result
-
-
-def read_comparison(state) -> Optional[ComparisonResult]:
-    raw = state.get(state_keys.COMPARISON)
-    if isinstance(raw, str):
-        try:
-            raw = json.loads(raw)
-        except json.JSONDecodeError:
-            return None
-    try:
-        return ComparisonResult.model_validate(raw) if raw else None
-    except ValueError as error:
-        logger.warning("Could not read the comparison: %s", error)
-        return None

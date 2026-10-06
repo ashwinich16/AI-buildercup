@@ -43,8 +43,6 @@ export const api = {
   authConfig: async () => (await request("/api/auth-config")).json(),
   startSession: async (preferredName = "") =>
     (await request("/api/sessions", { method: "POST", body: { preferred_name: preferredName } })).json(),
-  chat: async (sessionId, message) =>
-    (await request("/api/chat", { method: "POST", body: { session_id: sessionId, message } })).json(),
   // Scout's reply as it is written: onEvent gets {type: "delta" | "screen" | "done"} items.
   // Resolves with the final "done" item.
   chatStream: async (sessionId, message, onEvent) => {

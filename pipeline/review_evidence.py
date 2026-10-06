@@ -24,15 +24,11 @@ Run:
 """
 
 import json
-import os
-import sys
-from pathlib import Path
 
-from google import genai
 from google.genai import types
 from pydantic import BaseModel, Field
 
-sys.path.insert(0, str(Path(__file__).resolve().parent))
+from common import CloudSqlDatabase, Gemini, PipelineSettings
 
 MAX_REVIEWS = 20          # ingestion keeps at most 20 per product
 MAX_QUOTE_WORDS = 15      # short enough to read on a card and say out loud
@@ -112,10 +108,8 @@ def verified_quotes(evidence: PointEvidence, reviews: list[dict]) -> list[str]:
 
 
 class GeminiEvidenceFinder:
-    def __init__(self, project_id: str):
-        self._client = genai.Client(vertexai=True, project=project_id,
-                                    location=os.environ.get("GOOGLE_CLOUD_LOCATION", "us-central1"))
-        self._model = os.environ.get("SCOUT_ENRICH_MODEL", "gemini-2.5-flash")
+    def __init__(self, gemini: Gemini):
+        self._gemini = gemini
 
     def find(self, title: str, points: list[dict], reviews: list[dict]) -> EvidenceAnswer:
         prompt = PROMPT.format(
@@ -125,16 +119,7 @@ class GeminiEvidenceFinder:
             reviews="\n".join(f"{n}. ({r['rating']} stars) {r['title'] or ''}: {' '.join((r['text'] or '').split())}"
                               for n, r in enumerate(reviews, start=1)),
         )
-        response = self._client.models.generate_content(
-            model=self._model,
-            contents=prompt,
-            config=types.GenerateContentConfig(
-                temperature=0.0,
-                response_mime_type="application/json",
-                response_schema=EvidenceAnswer,
-            ),
-        )
-        return EvidenceAnswer.model_validate_json(response.text)
+        return self._gemini.answer([types.Part.from_text(text=prompt)], EvidenceAnswer)
 
 
 def with_evidence(points: list[dict], answer: EvidenceAnswer, reviews: list[dict]) -> list[dict]:
@@ -153,18 +138,16 @@ def with_evidence(points: list[dict], answer: EvidenceAnswer, reviews: list[dict
 
 
 def main():
-    import ingestion   # reuses its Cloud SQL connection settings
-
-    conn, connector = ingestion.get_connection()
-    cursor = conn.cursor()
-    try:
+    settings = PipelineSettings.from_env()
+    with CloudSqlDatabase(settings) as conn:
+        cursor = conn.cursor()
         cursor.execute(ADD_COLUMN_SQL)
         conn.commit()
         cursor.execute(PENDING_SQL)
         pending = cursor.fetchall()
         print(f"{len(pending)} products need review evidence.")
 
-        finder = GeminiEvidenceFinder(ingestion.PROJECT_ID)
+        finder = GeminiEvidenceFinder(Gemini(settings))
         dropped_total = kept_total = 0
         for number, (product_id, title, points) in enumerate(pending, start=1):
             points = points if isinstance(points, list) else json.loads(points or "[]")
@@ -192,10 +175,6 @@ def main():
             print(f"  [{number}/{len(pending)}] {title[:45]:<45} {kept} quotes  e.g. {sample[:70]}")
 
         print(f"\nKept {kept_total} verified quotes; dropped {dropped_total} that were not word for word.")
-    finally:
-        cursor.close()
-        conn.close()
-        connector.close()
 
 
 if __name__ == "__main__":

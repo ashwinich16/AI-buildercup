@@ -42,18 +42,13 @@ class ReviewPoint(BaseModel):
     def count(self) -> Optional[int]:
         return self.supporting_reviews if self.supporting_reviews is not None else self.mentions
 
-    def as_text(self) -> str:
-        count = f" ({self.count()} mentions)" if self.count() else ""
-        quote = f' e.g. "{self.quotes[0]}"' if self.quotes else ""
-        return f"{self.aspect}: {self.finding}{count}{quote}"
-
 
 class Product(BaseModel):
     # Core: present for any product in any category (only id and title are required)
     id: str
     title: str
     category: Optional[str] = None
-    product_type: Optional[str] = None    # the kind within the category, e.g. "polo" in "top"
+    product_type: Optional[str] = None    # the kind within the category (from the catalog's own list)
     gender: Optional[str] = None          # who it is made for: "men", "women" or "unisex"
     brand: Optional[str] = None
     price: Optional[float] = None

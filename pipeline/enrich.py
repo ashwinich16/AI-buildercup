@@ -22,64 +22,17 @@ Environment variables:
   SCOUT_DB_INSTANCE, SCOUT_DB_NAME, SCOUT_DB_USER, SCOUT_DB_PASSWORD_SECRET
   SCOUT_ENRICH_MODEL  optional, default gemini-2.5-flash
 
-Install:
-  pip install "cloud-sql-python-connector[pg8000]" google-cloud-secret-manager google-genai pydantic requests
+Install: see pipeline/common.py
 """
 
 import json
-import os
-import sys
 import time
-from dataclasses import dataclass
 from typing import Optional
 
-import requests
-from google import genai
-from google.cloud import secretmanager
-from google.cloud.sql.connector import Connector
-from google.genai import errors as genai_errors
 from google.genai import types
 from pydantic import BaseModel, Field
-from dotenv import load_dotenv
 
-load_dotenv()
-
-# ---------------------------------------------------------------------
-# Settings
-# ---------------------------------------------------------------------
-
-def _require_env(name: str) -> str:
-    value = os.environ.get(name, "").strip()
-    if not value:
-        sys.exit(f"Missing environment variable: {name}")
-    return value
-
-
-@dataclass(frozen=True)
-class EnrichSettings:
-    project_id: str
-    vertex_location: str
-    model: str
-    db_instance: str
-    db_name: str
-    db_user: str
-    db_password_secret: str
-    max_images: int = 3
-    max_reviews: int = 15
-    pause_seconds: float = 1.0
-
-    @classmethod
-    def from_env(cls) -> "EnrichSettings":
-        return cls(
-            project_id=_require_env("GOOGLE_CLOUD_PROJECT"),
-            vertex_location=os.environ.get("GOOGLE_CLOUD_LOCATION", "us-central1"),
-            model=os.environ.get("SCOUT_ENRICH_MODEL", "gemini-2.5-flash"),
-            db_instance=_require_env("SCOUT_DB_INSTANCE"),
-            db_name=_require_env("SCOUT_DB_NAME"),
-            db_user=_require_env("SCOUT_DB_USER"),
-            db_password_secret=_require_env("SCOUT_DB_PASSWORD_SECRET"),
-        )
-
+from common import CloudSqlDatabase, Gemini, PipelineSettings, image_part
 
 # ---------------------------------------------------------------------
 # Output schema (category-agnostic)
@@ -112,38 +65,6 @@ class ProductIntelligence(BaseModel):
 # Database
 # ---------------------------------------------------------------------
 
-class CloudSqlDatabase:
-    """Opens a Cloud SQL connection with the password from Secret Manager."""
-
-    def __init__(self, settings: EnrichSettings):
-        self._settings = settings
-        self._connector = None
-        self._connection = None
-
-    def __enter__(self):
-        self._connector = Connector()
-        self._connection = self._connector.connect(
-            self._settings.db_instance,
-            "pg8000",
-            user=self._settings.db_user,
-            password=self._read_password(),
-            db=self._settings.db_name,
-        )
-        return self._connection
-
-    def __exit__(self, *exc):
-        if self._connection:
-            self._connection.close()
-        if self._connector:
-            self._connector.close()
-
-    def _read_password(self) -> str:
-        client = secretmanager.SecretManagerServiceClient()
-        name = (f"projects/{self._settings.project_id}/secrets/"
-                f"{self._settings.db_password_secret}/versions/latest")
-        return client.access_secret_version(name=name).payload.data.decode("UTF-8").strip()
-
-
 class ProductRepository:
     """All SQL for this job lives here."""
 
@@ -157,7 +78,7 @@ class ProductRepository:
         SELECT p.product_id, p.title, p.category, p.brand, p.description, p.features, p.details
         FROM product p
         LEFT JOIN product_intelligence pi ON pi.product_id = p.product_id
-        WHERE pi.product_id IS NULL
+        WHERE pi.product_id IS NULL AND p.excluded_reason IS NULL   -- excluded products never reach the shop
         ORDER BY p.product_id;
     """
 
@@ -230,26 +151,6 @@ class ProductRepository:
 
 
 # ---------------------------------------------------------------------
-# Images
-# ---------------------------------------------------------------------
-
-class ImageFetcher:
-    """Downloads images as Gemini parts; skips any that fail."""
-
-    def fetch(self, urls: list[str]) -> list[types.Part]:
-        parts = []
-        for url in urls:
-            try:
-                response = requests.get(url, timeout=15)
-                response.raise_for_status()
-                mime = response.headers.get("Content-Type", "image/jpeg").split(";")[0]
-                parts.append(types.Part.from_bytes(data=response.content, mime_type=mime))
-            except requests.RequestException as error:
-                print(f"  ! image download failed ({url}): {error}")
-        return parts
-
-
-# ---------------------------------------------------------------------
 # Gemini
 # ---------------------------------------------------------------------
 
@@ -273,7 +174,7 @@ RULES
 4. spoken_summary_short: at most 2 sentences, under 40 words. Say what it is and its single most distinctive feature.
 5. spoken_summary_detailed: 5 to 7 sentences, under 130 words, in this order:
    a. overall impression (what it is and its feel),
-   b. colour and pattern in everyday comparisons (e.g. "soft sky blue, like faded jeans"),
+   b. colour and pattern in everyday comparisons a listener can picture,
    c. material and texture, how it would feel to touch,
    d. shape and notable details,
    e. how it wears or is used, including what reviewers say about fit, comfort or quality,
@@ -283,45 +184,18 @@ RULES
 
 
 class GeminiEnricher:
-    """Builds the prompt and calls Gemini with a structured response schema."""
+    """Builds the prompt and asks Gemini for the product's intelligence, photos first."""
 
-    def __init__(self, settings: EnrichSettings, image_fetcher: ImageFetcher):
-        self._client = genai.Client(vertexai=True, project=settings.project_id,
-                                    location=settings.vertex_location)
-        self._model = settings.model
-        self._image_fetcher = image_fetcher
+    def __init__(self, gemini: Gemini):
+        self._gemini = gemini
 
     def enrich(self, product: dict, image_urls: list[str], reviews: list[dict]) -> Optional[ProductIntelligence]:
-        parts = self._image_fetcher.fetch(image_urls)
+        parts = [part for part in (image_part(url) for url in image_urls) if part]
         if not parts:
             print("  ! no usable images, skipping")
             return None
-
         parts.append(types.Part.from_text(text=self._prompt(product, reviews)))
-        response = self._generate_with_retry(parts)
-        return ProductIntelligence.model_validate_json(response.text)
-
-    RETRY_CODES = (429, 500, 503)          # quota / temporarily unavailable
-    RETRY_WAITS_SECONDS = (10, 20, 40, 80)
-
-    def _generate_with_retry(self, parts: list[types.Part]):
-        """Call Gemini; on quota or overload errors wait and try again (10s, 20s, 40s, 80s)."""
-        for attempt, wait in enumerate((*self.RETRY_WAITS_SECONDS, None), start=1):
-            try:
-                return self._client.models.generate_content(
-                    model=self._model,
-                    contents=[types.Content(role="user", parts=parts)],
-                    config=types.GenerateContentConfig(
-                        response_mime_type="application/json",
-                        response_schema=ProductIntelligence,
-                        temperature=0.2,
-                    ),
-                )
-            except genai_errors.APIError as error:
-                if error.code not in self.RETRY_CODES or wait is None:
-                    raise
-                print(f"  ~ Gemini returned {error.code}; retry {attempt} in {wait}s")
-                time.sleep(wait)
+        return self._gemini.answer(parts, ProductIntelligence, temperature=0.2)
 
     def _prompt(self, product: dict, reviews: list[dict]) -> str:
         review_lines = [
@@ -353,10 +227,14 @@ class GeminiEnricher:
 class EnrichmentJob:
     """Loops over pending products. One failure never stops the batch."""
 
-    def __init__(self, repository: ProductRepository, enricher: GeminiEnricher, settings: EnrichSettings):
+    MAX_IMAGES = 3
+    MAX_REVIEWS = 15
+    PAUSE_SECONDS = 1.0     # between products, to stay well inside the Gemini quota
+
+    def __init__(self, repository: ProductRepository, enricher: GeminiEnricher, model: str):
         self._repository = repository
         self._enricher = enricher
-        self._settings = settings
+        self._model = model
 
     def run(self) -> None:
         self._repository.ensure_columns()
@@ -370,30 +248,26 @@ class EnrichmentJob:
             try:
                 result = self._enricher.enrich(
                     product,
-                    self._repository.image_urls(product_id, self._settings.max_images),
-                    self._repository.reviews(product_id, self._settings.max_reviews),
+                    self._repository.image_urls(product_id, self.MAX_IMAGES),
+                    self._repository.reviews(product_id, self.MAX_REVIEWS),
                 )
                 if result:
-                    self._repository.save(product_id, result, self._settings.model)
+                    self._repository.save(product_id, result, self._model)
                     done += 1
                     print(f"  > {result.spoken_summary_short}")
             except Exception as error:  # keep going; the next run retries this product
                 print(f"  ! failed: {error}")
                 self._repository.rollback()
-            time.sleep(self._settings.pause_seconds)
+            time.sleep(self.PAUSE_SECONDS)
 
         print(f"Done. Enriched {done} of {len(products)}.")
 
 
 def main() -> None:
-    settings = EnrichSettings.from_env()
+    settings = PipelineSettings.from_env()
+    gemini = Gemini(settings)
     with CloudSqlDatabase(settings) as connection:
-        job = EnrichmentJob(
-            repository=ProductRepository(connection),
-            enricher=GeminiEnricher(settings, ImageFetcher()),
-            settings=settings,
-        )
-        job.run()
+        EnrichmentJob(ProductRepository(connection), GeminiEnricher(gemini), gemini.model).run()
 
 
 if __name__ == "__main__":

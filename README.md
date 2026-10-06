@@ -16,15 +16,18 @@ conversationalAgent/
 │   ├── config.py, app.py        settings and the composition root (wires every agent)
 │   ├── domain/                  Product, ShoppingNeed, PreferenceProfile
 │   ├── catalog/                 CatalogRepository + Vertex AI Search implementation
-│   ├── tools/                   retrieval, catalog overview, cart, images, product references
+│   ├── tools/                   retrieval, catalog overview, cart, images, review evidence
 │   ├── agents/                  orchestrator, elicitation, narration, product_expert, comparison, preference
+│   │                            (+ state_keys.py: shared session state; model_io.py: model input/output)
 │   └── api/                     FastAPI web API: auth, chat sessions, speech, demo personas
 ├── frontend/                    React app (Vite): accessible voice-first UI
 │   └── src/
 │       ├── hooks/useVoice.js    listening (browser speech recognition) and speaking (Cloud TTS)
 │       ├── audio/earcons.js     the "your turn" / "thinking" / "paused" chimes
-│       └── components/          persona picker, header settings, conversation, products, cart
-├── pipeline/                    offline data jobs: enrich.py, export.py
+│       ├── components/          sign-in, header settings, conversation, products, cart
+│       └── format.js            how prices are shown
+├── pipeline/                    offline data jobs (ingestion, gender, product_type, enrich, review_evidence,
+│                                export) + common.py: settings, Cloud SQL, Gemini, photos shared by all of them
 ├── playground/                  `adk web` entry points: elicitation/, scout_app/
 ├── scripts/                     smoke tests against real cloud services
 ├── Dockerfile                   one Cloud Run service (API + built React app)
@@ -127,7 +130,7 @@ Open http://localhost:8080 and choose `scout_app` (the full Scout conversation) 
 
 ```bash
 # Can we reach Vertex AI Search, and what fields do the documents have?
-PYTHONPATH=src python scripts/check_vertex_search.py "warm jacket for winter"
+PYTHONPATH=src python scripts/check_vertex_search.py "formal shirt for the office"
 PYTHONPATH=src python scripts/check_vertex_search.py "office shoes" --filter 'category: ANY("shoe")'
 
 # Does retrieval (search + relaxation) find sensible products for sample needs?
@@ -141,14 +144,21 @@ On Windows PowerShell run `$env:PYTHONPATH="src"` once in the terminal, then the
 Run once (or whenever the catalog changes). All settings come from `.env`.
 
 ```bash
-python pipeline/ingestion.py        # Amazon Reviews 2023 -> curated products, images, reviews in Cloud SQL
+python pipeline/ingestion.py        # tops every category up to 50 products (office wear for shirts, trousers, bags, accessories)
 python pipeline/gender.py           # who each product is for: men / women / unisex
-python pipeline/product_type.py     # the kind within each category (shirt, t-shirt, polo...); flags misfiled items
+python pipeline/product_type.py     # the kind within each category (shirt, polo, dress pants...); flags misfiled items
 python pipeline/enrich.py           # Gemini reads photos, descriptions and reviews -> product_intelligence
 python pipeline/review_evidence.py  # backs each review point with word-for-word quotes and real counts
 python pipeline/export.py           # Cloud SQL -> JSONL in gs://$SCOUT_EXPORT_BUCKET/$SCOUT_EXPORT_OBJECT
 python scripts/check_catalog.py     # products, images, reviews and enrichment per category
 ```
+
+`ingestion.py` reads the Amazon_Fashion files of Amazon Reviews 2023 (Hugging Face mirror) and tops
+every category up to 50 products, half men's and half women's, with their best reviews. The kinds within
+each category (shirt, polo, dress pants, laptop bag, tie...) and what each category means are described in
+`CATALOG` in `pipeline/product_type.py`.
+
+Products with no price get an estimate within 10 of their category's average, marked `price_estimated = TRUE`.
 
 Every step only processes products it has not done yet, so re-running is safe. Products that do
 not belong in the shop can be left out without deleting them:

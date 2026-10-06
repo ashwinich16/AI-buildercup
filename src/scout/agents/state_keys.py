@@ -1,11 +1,15 @@
 """
-Names of the session-state keys the agents share.
+The session state the agents share: the key names, and typed readers for them.
 
-Keeping them in one place means no agent spells another agent's key by hand.
-Keys starting with "user:" are ADK user-scoped: they belong to the shopper and
-are shared across all their sessions (persisted when the session service is
-backed by a database such as Cloud SQL).
+Keeping both in one place means no agent spells another agent's key by hand or
+re-parses the stored data its own way. Keys starting with "user:" are ADK
+user-scoped: they belong to the shopper and are shared across their sessions.
 """
+
+from typing import Optional
+
+from scout.domain import PreferenceProfile, Product, ShoppingNeed
+from scout.tools.cart import Cart
 
 # Current conversation
 NEED = "need"                        # ShoppingNeed as a dict, built up over the conversation
@@ -38,3 +42,40 @@ PREFERENCES = "preferences"
 
 # Kept by ADK across this shopper's sessions (in memory); moves to BigQuery with the analytics work
 REQUESTED_CATEGORIES = "user:requested_categories"  # categories they asked for that the catalog lacks
+
+
+# ---------------------------------------------------------------------
+# Typed readers (any mapping with .get: session state, ADK context state)
+# ---------------------------------------------------------------------
+
+def need(state) -> ShoppingNeed:
+    return ShoppingNeed.model_validate(state.get(NEED) or {})
+
+
+def profile(state) -> PreferenceProfile:
+    return PreferenceProfile.model_validate(state.get(PREFERENCES) or {})
+
+
+def cart(state) -> Cart:
+    return Cart.model_validate(state.get(CART) or {})
+
+
+def shortlist(state) -> dict[str, Product]:
+    """The products Retrieval found, by id."""
+    return {item["id"]: Product.model_validate(item) for item in state.get(SHORTLIST) or [] if item.get("id")}
+
+
+def presented(state) -> list[Product]:
+    """The products Scout last spoke about, in the order it said them."""
+    found = shortlist(state)
+    return [found[i] for i in state.get(PRESENTED) or [] if i in found]
+
+
+def focus(state) -> Optional[Product]:
+    """The product currently being discussed."""
+    return shortlist(state).get(state.get(FOCUS_PRODUCT))
+
+
+def is_exact(state, product_id: str) -> bool:
+    """Does this product match everything the shopper asked for? (Nothing relaxed means all of them do.)"""
+    return not state.get(RELAXED) or product_id in set(state.get(EXACT_MATCHES) or [])

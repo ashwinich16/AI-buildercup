@@ -3,9 +3,8 @@ Scout web API (FastAPI). Serves the React app and these endpoints:
 
   GET  /api/auth-config     how the frontend signs in (demo personas or Firebase settings)
   POST /api/sessions        start a conversation; returns Scout's opening words
-  POST /api/chat            send a message; get Scout's reply + what to show
-  POST /api/chat/stream     the same, streamed as Scout writes it (newline-delimited JSON)
-  GET  /api/screen          current products and cart (e.g. after a reload)
+  POST /api/chat/stream     send a message; Scout's reply streams back as it is written, then what
+                            to show (newline-delimited JSON)
   POST /api/speech          Scout's reply as natural speech (MP3)
 
 The shopper (id and name) always comes from the Authenticator, never from the
@@ -28,7 +27,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
 from scout.api.auth import Authenticator, DemoPersonaAuthenticator, FirebaseAuthenticator, Shopper
-from scout.api.chat_service import ChatTurn, ScoutChatService, ScreenState, StartedSession
+from scout.api.chat_service import ScoutChatService, StartedSession
 from scout.api.personas import load_personas
 from scout.api.shopper_repository import build_shopper_repository
 from scout.api.speech import SpeechSynthesizer
@@ -73,8 +72,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     personas = load_personas()
 
     # Warm every cloud connection at start-up and keep it warm, so no shopper waits for a cold start.
+    # An empty search matches any catalog; nothing here depends on what the shop sells.
     warm_calls = [catalog.categories, catalog.product_types,
-                  lambda: catalog.search(SearchQuery(text="jeans", limit=1)),
+                  lambda: catalog.search(SearchQuery(text="", limit=1)),
                   lambda: speech.synthesize("Hi")]
 
     @asynccontextmanager
@@ -104,18 +104,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             raise HTTPException(status_code=503, detail="I can't reach your saved cart and preferences "
                                                         "right now. Please try again in a moment.")
 
-    @app.post("/api/chat")
-    async def send_message(body: ChatRequest, shopper: Shopper = Depends(current_shopper)) -> ChatTurn:
-        try:
-            return await chat.send(shopper.id, body.session_id, body.message.strip())
-        except LookupError:
-            raise HTTPException(status_code=404, detail="Conversation not found. Please start again.")
-        except ValueError as error:          # ADK raises this for an unknown session
-            raise HTTPException(status_code=404, detail=str(error))
-
     @app.post("/api/chat/stream")
     async def stream_message(body: ChatRequest, shopper: Shopper = Depends(current_shopper)) -> StreamingResponse:
-        await chat.screen(shopper.id, body.session_id)   # 404 before streaming starts, not halfway through
+        try:
+            await chat.ensure_session(shopper.id, body.session_id)   # 404 before streaming starts, not halfway
+        except LookupError:
+            raise HTTPException(status_code=404, detail="Conversation not found. Please start again.")
 
         async def lines():
             try:
@@ -126,13 +120,6 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 yield json.dumps({"type": "error", "detail": "Something went wrong on my side."}) + "\n"
 
         return StreamingResponse(lines(), media_type="application/x-ndjson")
-
-    @app.get("/api/screen")
-    async def current_screen(session_id: str, shopper: Shopper = Depends(current_shopper)) -> ScreenState:
-        try:
-            return await chat.screen(shopper.id, session_id)
-        except LookupError:
-            raise HTTPException(status_code=404, detail="Conversation not found.")
 
     @app.post("/api/speech")
     async def speak(body: SpeechRequest, _: Shopper = Depends(current_shopper)) -> Response:

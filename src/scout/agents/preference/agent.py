@@ -5,7 +5,7 @@ budget habits, and how they like Scout to talk with them).
 Runs AFTER Scout has replied, so it never slows the conversation. From what
 happened this turn (a product chosen or rejected, or something the shopper
 said about themselves) it extracts LASTING preferences and merges them into
-the user-scoped profile. Merging is done in code (PreferenceProfile.merge):
+the shopper's profile. Merging is done in code (PreferenceProfile.merge):
 stated preferences are certain, learned ones start with low confidence and
 only grow with repeated evidence.
 """
@@ -20,11 +20,12 @@ from google.adk.agents.readonly_context import ReadonlyContext
 from google.adk.models import LlmResponse
 from google.adk.planners import BuiltInPlanner
 from google.genai import types
-from pydantic import BaseModel, Field, ValidationError
+from pydantic import BaseModel, Field
 
 from scout.agents import state_keys
+from scout.agents.model_io import response_json
 from scout.config import Settings
-from scout.domain import Preference, PreferenceKey, PreferenceProfile
+from scout.domain import Preference, PreferenceKey
 
 logger = logging.getLogger(__name__)
 
@@ -88,7 +89,7 @@ class PreferenceAgentBuilder:
 
     def _instruction(self, context: ReadonlyContext) -> str:
         state = context.state
-        profile = PreferenceProfile.model_validate(state.get(state_keys.PREFERENCES) or {})
+        profile = state_keys.profile(state)
         return INSTRUCTION.format(
             profile=json.dumps([p.model_dump() for p in profile.preferences], ensure_ascii=False) or "[]",
             evidence=state.get(state_keys.PREFERENCE_EVIDENCE) or "The shopper said something about themselves.",
@@ -96,18 +97,10 @@ class PreferenceAgentBuilder:
 
     # Merge in code, so the confidence rules are applied exactly, not left to the model.
     def _merge(self, callback_context: CallbackContext, llm_response: LlmResponse) -> Optional[LlmResponse]:
-        if llm_response.partial or not llm_response.content or not llm_response.content.parts:
-            return None
-        text = "".join(part.text or "" for part in llm_response.content.parts if not part.thought)
-        try:
-            update = PreferenceUpdate.model_validate(json.loads(text))
-        except (json.JSONDecodeError, ValidationError) as error:
-            logger.warning("Preference output could not be parsed: %s", error)
-            return None
-
-        if update.updates or update.forget:
+        update = response_json(llm_response, PreferenceUpdate)
+        if update and (update.updates or update.forget):
             state = callback_context.state
-            profile = PreferenceProfile.model_validate(state.get(state_keys.PREFERENCES) or {})
+            profile = state_keys.profile(state)
             state[state_keys.PREFERENCES] = profile.merge(update.updates, update.forget).model_dump()
             logger.info("Preferences updated: +%d, forgotten %d", len(update.updates), len(update.forget))
         return None

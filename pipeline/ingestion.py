@@ -1,139 +1,95 @@
 """
-Scout — Catalog Ingestion Script (Step 3)
-==========================================
+Scout — Catalog Ingestion Script
+================================
 
-Run this in YOUR OWN Cloud Shell / a VM with normal internet access —
-not in a network-restricted sandbox. It needs to reach the McAuley Lab
-dataset host and your Cloud SQL instance.
+Run this in Cloud Shell or a laptop with normal internet access. It needs to reach the
+McAuley Lab dataset (Hugging Face mirror) and your Cloud SQL instance. Settings come from .env.
 
 What it does, in order:
-  1. Connects to Cloud SQL Postgres securely via the Cloud SQL Python
-     Connector, pulling the app password from Secret Manager.
-  2. Streams the Amazon Reviews 2023 item-metadata file (Amazon_Fashion
-     subset) line by line — never loads the whole file into memory.
-  3. Applies curation criteria to pick a small, demo-quality catalog
-     (TARGET_BUCKETS, skipping products already in the DB) instead of
-     ingesting the full noisy long-tail.
-  4. Buckets each item into our own `category` (top/jeans/jacket/shoe/bag/
-     accessory) instead of trusting Amazon's raw taxonomy.
+  1. Connects to Cloud SQL Postgres via the Cloud SQL Python Connector, pulling the app
+     password from Secret Manager.
+  2. Streams the Amazon Reviews 2023 item-metadata file (Amazon_Fashion subset) line by line.
+  3. Tops every category up to TARGET_PER_CATEGORY products (office wear for shirts, trousers,
+     accessories and bags), half men's and half women's, skipping products already in the DB.
+  4. Buckets each item into our own `category` instead of trusting Amazon's raw taxonomy.
   5. Inserts the curated products + their catalog images.
-  6. Streams the matching reviews file, keeps only reviews whose
-     parent_asin is one of our curated products, caps + ranks reviews
-     per product, and inserts them.
+  6. Streams the matching reviews file, keeps the best reviews of our curated products, inserts them.
+  7. Gives every product with no price (new and existing) a price within ±PRICE_SPREAD of its
+     category's average, marked price_estimated = TRUE.
 
-Install first:
-  pip install "cloud-sql-python-connector[pg8000]" google-cloud-secret-manager
+Install: see pipeline/common.py
 """
 
 import gzip
 import json
+import random
 import re
 import urllib.request
 from collections import defaultdict
 
-from google.cloud.sql.connector import Connector
-from google.cloud import secretmanager
-import pg8000
-
+from common import CloudSqlDatabase, PipelineSettings
 from gender import ADD_COLUMN_SQL as ADD_GENDER_COLUMN_SQL, gender_from_listing
 
 
 # ---------------------------------------------------------------------
-# CONFIG — fill these in for your project
+# CONFIG (Cloud SQL settings come from .env, see common.py)
 # ---------------------------------------------------------------------
-PROJECT_ID = "scout-hackathon"
-REGION = "asia-south2"                 # region your Cloud SQL instance is in
-INSTANCE_NAME = "scoutdb1"             # Cloud SQL instance id
-DB_NAME = "scout_catalog"
-DB_USER = "scout_app"
-DB_PASSWORD_SECRET_ID = "scoutdb1-password"   # secret created in Step 1
 
-# Dataset source (McAuley Lab, Amazon Reviews 2023)
-# Hugging Face mirror (https://huggingface.co/datasets/McAuley-Lab/Amazon-Reviews-2023), uncompressed JSONL.
-# Amazon_Fashion rather than Clothing_Shoes_and_Jewelry: its reviews file is ~1 GB vs ~28 GB, and
-# curate_reviews has to stream the whole thing.
+# Dataset source (McAuley Lab, Amazon Reviews 2023), Hugging Face mirror, uncompressed JSONL.
+# Amazon_Fashion rather than Clothing_Shoes_and_Jewelry: its reviews file is ~1 GB vs ~28 GB.
 HF_BASE = "https://huggingface.co/datasets/McAuley-Lab/Amazon-Reviews-2023/resolve/main/raw"
 METADATA_URL = f"{HF_BASE}/meta_categories/meta_Amazon_Fashion.jsonl"
 REVIEWS_URL = f"{HF_BASE}/review_categories/Amazon_Fashion.jsonl"
 
 # Curation knobs
-# How many NEW products to add per bucket on this run. Products already in the DB are skipped,
-# so re-running with a bigger number tops a bucket up rather than re-adding the same items.
-# (The original 125-item catalog was 25 each of shirt/jacket/shoe/bag/accessory; "shirt" is now "top",
-# since that bucket holds t-shirts, blouses and polos too. product_type.py says which kind each one is.)
-TARGET_BUCKETS = {"top": 25, "jeans": 25}
+# Every category is topped up to this many products (half men's, half women's). Products already
+# in the DB count towards it and are never added twice, so re-running only fills what is missing.
+TARGET_PER_CATEGORY = 50
 MIN_RATING_NUMBER = 15        # item must have at least this many ratings to be "real" enough to compare
 MAX_REVIEWS_PER_PRODUCT = 20  # cap so the review corpus per item stays small enough for Gemini summarization
+PRICE_SPREAD = 10.0           # missing prices are filled within category average ± this
 
 
 # ---------------------------------------------------------------------
-# 1. DATABASE CONNECTION
+# 1. CATEGORY BUCKETING (our own taxonomy)
 # ---------------------------------------------------------------------
-# WHY the Cloud SQL Python Connector instead of a plain host:port
-# connection: it authenticates using IAM + the instance connection name
-# rather than a public IP you have to allowlist, so this script works
-# unmodified whether it's run from Cloud Shell, a laptop, or later from
-# a Cloud Run job — one less thing to misconfigure under deadline
-# pressure.
-#
-# WHY the password comes from Secret Manager instead of being pasted
-# here: this file is going into the GitHub repo for the hackathon
-# submission. A hardcoded DB password in a public repo is the single
-# most common accidental leak in projects like this.
-
-def get_db_password() -> str:
-    client = secretmanager.SecretManagerServiceClient()
-    name = f"projects/{PROJECT_ID}/secrets/{DB_PASSWORD_SECRET_ID}/versions/latest"
-    response = client.access_secret_version(name=name)
-    return response.payload.data.decode("UTF-8").strip()
-
-
-def get_connection():
-    connector = Connector()
-    instance_connection_name = f"{PROJECT_ID}:{REGION}:{INSTANCE_NAME}"
-
-    def getconn():
-        return connector.connect(
-            instance_connection_name,
-            "pg8000",
-            user=DB_USER,
-            password=get_db_password(),
-            db=DB_NAME,
-        )
-
-    conn = getconn()
-    return conn, connector
-
-
-# ---------------------------------------------------------------------
-# 2. CATEGORY BUCKETING (our own taxonomy, decided in Step 2)
-# ---------------------------------------------------------------------
-# WHY: Amazon's `categories` breadcrumb is inconsistent and too granular
-# ("Women > Clothing > Active > Active Tops > ...") to be useful as a
-# comparison grouping. The comparison agent needs a small, predictable
-# set of buckets so it only ever compares like-with-like.
+# Amazon's `categories` breadcrumb is inconsistent and too granular to be a comparison grouping,
+# so we bucket by the title. First match wins. The shirt, trousers, bag and accessory buckets only take
+# office wear, which is what this run adds for the demo. pipeline/product_type.py then has Gemini check
+# every product against its category and moves or excludes any that the keywords got wrong.
 
 CATEGORY_RULES = [
-    ("shoe", re.compile(r"\b(shoe|sneaker|boot|sandal|heel|loafer|flat)\b", re.I)),
-    ("bag", re.compile(r"\b(bag|backpack|tote|purse|handbag|clutch|wristlet)\b", re.I)),
-    ("jacket", re.compile(r"\b(jacket|coat|blazer|hoodie|parka)\b", re.I)),
-    ("accessory", re.compile(r"\b(belt|scarf|hat|sunglasses|jewelry|watch|wallet)\b", re.I)),
+    # Office shirts, men's and women's. "polo" is not here: it's not office wear, and it matched the
+    # brand "U.S. Polo Assn.".
+    ("shirt", re.compile(r"\b(dress shirts?|formal shirts?|office shirts?|work shirts?|business shirts?|"
+                         r"oxford shirts?|button[- ](down|up) shirts?|non[- ]iron)\b", re.I)),
+    # Office trousers, men's and women's. Checked before shoes, so "Flat Front Dress Pants" isn't a flat.
+    ("trousers", re.compile(r"\b(dress pants?|formal pants?|office pants?|work pants?|suit pants?|"
+                            r"business pants?|slacks|trousers?|chinos?)\b", re.I)),
+    ("shoe", re.compile(r"\b(shoes?|sneakers?|boots?|sandals?|heels?|loafers?|flats)\b", re.I)),
+    ("jacket", re.compile(r"\b(jackets?|coats?|blazers?|hoodies?|parkas?)\b", re.I)),
     # No bare "top" keyword: it matched "Top Zip Wristlet" and "Tankini Top".
-    # No bare "polo" either: it matched the brand "U.S. Polo Assn." on joggers.
-    ("top", re.compile(r"\b(shirts?|t-shirts?|tees?|blouses?|button[- ]down|henley)\b", re.I)),
-    # After "top" so brand names like "Calvin Klein Jeans Men's T-Shirt" stay tops.
+    # Women's tops (other shirts belong in "shirt", which only takes office shirts this run).
+    ("top", re.compile(r"\b(t-shirts?|tees?|blouses?|tunics?|henley)\b", re.I)),
+    # After the others so brand names like "Calvin Klein Jeans Men's Dress Shirt" aren't jeans.
     # "jean(?!-)" so "Jean-Michel Jarre" (a concert DVD in this file) isn't jeans.
     ("jeans", re.compile(r"\b(jeans|jean(?!-)|denim pants?)\b", re.I)),
+    # Bags and accessories come last: garments often mention them as extras ("coat with belt",
+    # "jacket with laptop pocket"), and those are still garments.
+    # Office bags: laptop bags, briefcases and work bags.
+    ("bag", re.compile(r"\b(laptop|computer|briefcases?|messenger bags?|work (bag|tote)s?|business bags?)\b", re.I)),
+    # Office accessories: ties, cufflinks, tie clips, belts, watches, wallets, card holders.
+    ("accessory", re.compile(r"\b(neck ?ties?|ties?(?![- ]dye)|tie (clips?|bars?)|cufflinks?|belts?|watch(es)?|wallets?|"
+                             r"card holders?)\b", re.I)),
 ]
 
-# Titles that keyword-match a bucket but aren't the garment itself: swimwear "tops", keychain
-# "bag" charms, kids' sizes, jean shorts/skirts, jeggings, tank tops and sleepwear sold as
-# "shirts", medical/collar add-ons, and sewing/fit accessories "for jeans".
+# Titles that keyword-match a bucket but aren't the garment itself: swimwear, kids' sizes, shorts,
+# skirts, dresses (but not "dress shirt" / "dress pants"), sportswear and sleepwear, add-ons "for" a garment.
 EXCLUDE_PATTERN = re.compile(
     r"\b(swim\w*|tankini|bikini|keychain|charms?|pendant|costume|baby|toddler|girl'?s|boy'?s|kids|"
-    r"shorts?|skirts?|dress(es)?|overalls?|jeggings?|leggings?|joggers?|sweatpants|"
-    r"tanks?|a-shirts?|camis?|nightshirts?|nightgowns?|sleepwear|pajamas?|sweaters?|cardigans?|"
-    r"surgery|mastectomy|recovery|collars?|leather pants|aprons?|extenders?|stretchers?|patch(es)?|hangers?)\b",
+    r"shorts|skirts?|dresses|shirt ?dress|dress(?![\s-]+(shirts?|pants?|shoes?|slacks|trousers?|belts?|watch(es)?|socks?))|overalls?|jeggings?|leggings?|joggers?|sweatpants|yoga|cargo|"
+    r"tanks?|a-shirts?|camis?|nightshirts?|nightgowns?|sleepwear|pajamas?|pyjamas?|nightwear|lederhosen|sweaters?|cardigans?|"
+    r"belt bags?|fanny packs?|surgery|mastectomy|recovery|leather pants|aprons?|extenders?|stretchers?|patch(es)?|hangers?)\b",
     re.I,
 )
 
@@ -149,13 +105,10 @@ def bucket_category(title: str, categories: list) -> str:
 
 
 # ---------------------------------------------------------------------
-# 3. STREAMING JSONL READER
+# 2. STREAMING JSONL READER
 # ---------------------------------------------------------------------
-# WHY streaming: the raw metadata/review files are several GB each.
-# Reading them into memory would either crash or make this script
-# unusable on a small Cloud Shell VM. Line-by-line iteration keeps
-# memory flat regardless of file size; only the curated candidates are
-# kept in memory.
+# The files are large, so they are read line by line: memory stays flat; only the curated
+# candidates are kept.
 
 def stream_jsonl(url: str):
     # Handles both the gzipped McAuley Lab files and the plain .jsonl Hugging Face mirror.
@@ -167,26 +120,11 @@ def stream_jsonl(url: str):
 
 
 # ---------------------------------------------------------------------
-# 4. PRODUCT CURATION
+# 3. PRODUCT CURATION
 # ---------------------------------------------------------------------
-# WHY these specific filters, and why a per-category cap:
-#   - rating_number >= MIN_RATING_NUMBER: filters out near-zero-review
-#     listings, so every curated product actually has real review text
-#     for the narration/comparison agents to draw on (we never fabricate
-#     review evidence, so if there's no review text, the feature is dead
-#     weight for the demo).
-#   - must have at least one image: this is a vision-dependent shopping
-#     assistant — an item Gemini can't see is useless in the demo.
-#   - non-empty description or features: gives the visual-attributes
-#     extraction something real to ground against, not just a title.
-#   - capped per bucket: we want the demo catalog spread across
-#     shirts/jackets/shoes/bags/accessories, not 125 random shirts,
-#     because the comparison agent's value only shows up when there
-#     are multiple comparable items in the same bucket.
-#   - most-rated first: we scan the whole file and keep the top
-#     TARGET_BUCKETS[bucket] items by rating_number, instead of the
-#     first matches in file order, so the additions are well-known,
-#     review-rich products.
+# Filters: enough ratings (so there is real review text), an image (Scout describes photos),
+# a description or features (so Gemini has text to ground attributes in). Most-rated first,
+# half men's and half women's per bucket.
 
 def clean_text(value):
     # Postgres TEXT rejects NUL bytes, which do appear in some scraped Amazon text.
@@ -203,7 +141,7 @@ def parse_price(value):
         return None
 
 
-def curate_products(metadata_iter, existing_ids: set):
+def curate_products(metadata_iter, existing_ids: set, needed: dict):
     candidates = defaultdict(list)
 
     for item in metadata_iter:
@@ -227,8 +165,8 @@ def curate_products(metadata_iter, existing_ids: set):
 
         categories = item.get("categories") or []
         category = bucket_category(title, categories)
-        if category not in TARGET_BUCKETS:
-            continue  # only fill the buckets this run is targeting
+        if not needed.get(category):
+            continue  # only fill the categories that still need products
 
         details = item.get("details") or {}
         brand = None
@@ -268,8 +206,17 @@ def curate_products(metadata_iter, existing_ids: set):
             if not keys & seen:
                 seen |= keys
                 ranked.append(p)
-        selected.extend(ranked[:TARGET_BUCKETS[category]])
+        selected.extend(half_men_half_women(ranked, needed[category]))
     return selected
+
+
+def half_men_half_women(ranked: list, count: int) -> list:
+    """The best `count` products, half women's and half men's; unisex/unknown items fill any gap."""
+    women = [p for p in ranked if p["gender"] == "women"][: count // 2]
+    men = [p for p in ranked if p["gender"] == "men"][: count - len(women)]
+    picked = women + men
+    rest = [p for p in ranked if p not in picked]
+    return picked + rest[: count - len(picked)]
 
 
 def title_key(title: str) -> str:
@@ -279,14 +226,10 @@ def title_key(title: str) -> str:
 
 
 # ---------------------------------------------------------------------
-# 5. REVIEW CURATION
+# 4. REVIEW CURATION
 # ---------------------------------------------------------------------
-# WHY we buffer reviews per product before inserting, instead of
-# inserting as we go: the review file is not sorted by product, and we
-# want the BEST reviews per product (verified + most helpful), not just
-# the first N we happen to encounter. WHY cap at MAX_REVIEWS_PER_PRODUCT:
-# bounds how much text the Comparison/Narration agents load per item,
-# keeping prompt size and latency predictable in the demo.
+# The review file is not sorted by product, and we want the BEST reviews per product (verified +
+# most helpful), so reviews are buffered per product, ranked, and capped at MAX_REVIEWS_PER_PRODUCT.
 
 def curate_reviews(reviews_iter, wanted_parent_asins: set):
     buffer = defaultdict(list)
@@ -324,11 +267,9 @@ def curate_reviews(reviews_iter, wanted_parent_asins: set):
 
 
 # ---------------------------------------------------------------------
-# 6. INSERTS
+# 5. INSERTS AND PRICES
 # ---------------------------------------------------------------------
-# WHY ON CONFLICT DO NOTHING on product_id: makes the script safe to
-# re-run (idempotent) while you're iterating on curation rules, without
-# needing to truncate tables every time.
+# ON CONFLICT DO NOTHING on product_id makes the script safe to re-run.
 
 INSERT_PRODUCT_SQL = """
 INSERT INTO product (
@@ -354,6 +295,8 @@ INSERT INTO review (
     %s, %s, %s, %s, %s, %s, %s, %s
 );
 """
+
+ADD_PRICE_ESTIMATED_SQL = "ALTER TABLE product ADD COLUMN IF NOT EXISTS price_estimated BOOLEAN NOT NULL DEFAULT FALSE;"
 
 
 def insert_products(cursor, products):
@@ -385,28 +328,52 @@ def insert_reviews(cursor, reviews):
         ))
 
 
+def fill_missing_prices(cursor) -> int:
+    """Every product with no price (new and existing) gets a random price within ±PRICE_SPREAD of its
+    category's average, so budget questions work for every product. Marked price_estimated = TRUE."""
+    cursor.execute(ADD_PRICE_ESTIMATED_SQL)
+    cursor.execute("SELECT category, avg(price) FROM product WHERE price > 0 GROUP BY category;")
+    averages = {category: float(average) for category, average in cursor.fetchall()}
+    cursor.execute("SELECT product_id, category FROM product WHERE price IS NULL OR price <= 0;")
+    filled = 0
+    for product_id, category in cursor.fetchall():
+        if category not in averages:
+            continue   # no priced product in this category to take an average from
+        average = averages[category]
+        price = round(random.uniform(max(1.0, average - PRICE_SPREAD), average + PRICE_SPREAD), 2)
+        cursor.execute("UPDATE product SET price = %s, price_estimated = TRUE WHERE product_id = %s;",
+                       (price, product_id))
+        filled += 1
+    return filled
+
+
 # ---------------------------------------------------------------------
 # MAIN
 # ---------------------------------------------------------------------
 
 def main():
     print("Connecting to Cloud SQL...")
-    conn, connector = get_connection()
-    cursor = conn.cursor()
-
-    try:
-        cursor.execute(ADD_GENDER_COLUMN_SQL)   # no-op once the column exists
+    with CloudSqlDatabase(PipelineSettings.from_env()) as conn:
+        cursor = conn.cursor()
+        cursor.execute(ADD_GENDER_COLUMN_SQL)   # no-ops once the columns exist
+        cursor.execute("ALTER TABLE product ADD COLUMN IF NOT EXISTS excluded_reason TEXT;")
         conn.commit()
 
         cursor.execute("SELECT product_id FROM product;")
         existing_ids = {row[0] for row in cursor.fetchall()}
-        print(f"{len(existing_ids)} products already in the catalog; adding {TARGET_BUCKETS}.")
+        # Excluded products (product_type.py / by hand) stay in the DB but don't count towards the 50.
+        cursor.execute("SELECT category, count(*) FROM product WHERE excluded_reason IS NULL GROUP BY category;")
+        counts = dict(cursor.fetchall())
+        categories = list(dict.fromkeys(label for label, _ in CATEGORY_RULES))
+        needed = {c: max(0, TARGET_PER_CATEGORY - counts.get(c, 0)) for c in categories}
+        print(f"Products per category now: {counts}")
+        print(f"Adding: {needed}")
 
         print(f"Streaming metadata from {METADATA_URL} ...")
-        products = curate_products(stream_jsonl(METADATA_URL), existing_ids)
+        products = curate_products(stream_jsonl(METADATA_URL), existing_ids, needed)
         counts = defaultdict(int)
         for p in products:
-            counts[p["category"]] += 1
+            counts[(p["category"], p["gender"] or "unknown")] += 1
         print(f"Curated {len(products)} new products: {dict(counts)}")
 
         print("Inserting products + images...")
@@ -423,12 +390,12 @@ def main():
         insert_reviews(cursor, reviews)
         conn.commit()
 
+        filled = fill_missing_prices(cursor)
+        conn.commit()
+        print(f"Filled in an estimated price for {filled} products (price_estimated = TRUE).")
+
         unlabelled = sum(1 for p in products if not p["gender"])
         print(f"Done. {unlabelled} new products need `python pipeline/gender.py` to label their gender.")
-    finally:
-        cursor.close()
-        conn.close()
-        connector.close()
 
 
 if __name__ == "__main__":

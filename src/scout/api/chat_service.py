@@ -11,7 +11,6 @@ Two kinds of memory:
 """
 
 import asyncio
-import json
 import logging
 import re
 from typing import AsyncIterator, Optional
@@ -24,8 +23,10 @@ from google.genai import types
 from pydantic import BaseModel, Field
 
 from scout.agents import state_keys
+from scout.agents.elicitation import read_turn
+from scout.agents.model_io import content_text
 from scout.api.shopper_repository import ShopperMemory, ShopperRepository
-from scout.domain import Preference, PreferenceProfile, Product, ShoppingNeed
+from scout.domain import Preference, PreferenceProfile
 from scout.tools import Cart, CartItem, EvidencePicker
 
 logger = logging.getLogger(__name__)
@@ -105,25 +106,9 @@ class ScoutChatService:
         return StartedSession(session_id=session.id, greeting=greeting, shopper_name=name,
                               **_screen_from_state(session.state).model_dump())
 
-    async def send(self, user_id: str, session_id: str, text: str) -> ChatTurn:
-        before = _memory_from_state((await self._get(user_id, session_id)).state)
-        message = types.Content(role="user", parts=[types.Part(text=text)])
-        replies = []
-        async for event in self._runner.run_async(user_id=user_id, session_id=session_id, new_message=message):
-            spoken = _text_of(event)
-            if spoken:
-                replies.append(spoken)
-        session = await self._get(user_id, session_id)
-        await self._remember(user_id, before, _memory_from_state(session.state))
-        action = _ACTIONS.get(_intent(session.state))
-        reply = "\n\n".join(replies)
-        if not reply and action != "pause":
-            reply = "Sorry, I lost my train of thought. Could you say that again?"
-        return ChatTurn(reply=reply, action=action, **_screen_from_state(session.state).model_dump())
-
     async def send_stream(self, user_id: str, session_id: str, text: str) -> AsyncIterator[dict]:
-        """Like send(), but Scout's words arrive while they are being written, so the shopper hears
-        the first sentence within a second or two instead of waiting for the whole reply.
+        """One turn of the conversation. Scout's words arrive while they are being written, so the shopper
+        hears the first sentence within a second or two instead of waiting for the whole reply.
 
         Yields, in order:
           {"type": "delta", "text": ...}       a piece of the reply (append it)
@@ -137,7 +122,7 @@ class ScoutChatService:
         streamed = False          # pieces of the current message were already sent
         async for event in self._runner.run_async(user_id=user_id, session_id=session_id,
                                                   new_message=message, run_config=streaming):
-            raw = _raw_text(event)
+            raw = content_text(event.content)
             if not raw:
                 continue
             if getattr(event, "partial", False):
@@ -159,16 +144,18 @@ class ScoutChatService:
 
         session = await self._get(user_id, session_id)
         await self._remember(user_id, before, _memory_from_state(session.state))
-        action = _ACTIONS.get(_intent(session.state))
+        turn = read_turn(session.state)
+        action = _ACTIONS.get(turn.intent) if turn else None
         reply = "\n\n".join(replies)
         if not reply and action != "pause":
             reply = "Sorry, I lost my train of thought. Could you say that again?"
             yield {"type": "delta", "text": reply}
-        turn = ChatTurn(reply=reply, action=action, **_screen_from_state(session.state).model_dump())
-        yield {"type": "done", **turn.model_dump(mode="json")}
+        done = ChatTurn(reply=reply, action=action, **_screen_from_state(session.state).model_dump())
+        yield {"type": "done", **done.model_dump(mode="json")}
 
-    async def screen(self, user_id: str, session_id: str) -> ScreenState:
-        return _screen_from_state((await self._get(user_id, session_id)).state)
+    async def ensure_session(self, user_id: str, session_id: str) -> None:
+        """Raises LookupError if this shopper has no such conversation."""
+        await self._get(user_id, session_id)
 
     async def _get(self, user_id: str, session_id: str):
         session = await self._sessions.get_session(app_name=APP_NAME, user_id=user_id, session_id=session_id)
@@ -198,22 +185,12 @@ def _memory_from_state(state: dict) -> ShopperMemory:
     return ShopperMemory(
         known=True,
         preferred_name=state.get(state_keys.SHOPPER_NAME) or "",
-        preferences=PreferenceProfile.model_validate(state.get(state_keys.PREFERENCES) or {}),
-        cart=Cart.model_validate(state.get(state_keys.CART) or {}),
+        preferences=state_keys.profile(state),
+        cart=state_keys.cart(state),
     )
 
 
-_ACTIONS = {"pause": "pause", "end_conversation": "end"}
-
-
-def _intent(state: dict) -> Optional[str]:
-    turn = state.get(state_keys.TURN)
-    if isinstance(turn, str):
-        try:
-            turn = json.loads(turn)
-        except json.JSONDecodeError:
-            return None
-    return turn.get("intent") if isinstance(turn, dict) else None
+_ACTIONS = {"pause": "pause", "end_conversation": "end"}   # intents the UI acts on (go quiet / stop listening)
 
 
 def _greeting(name: str, returning: bool, cart: Cart) -> str:
@@ -229,7 +206,7 @@ def _greeting(name: str, returning: bool, cart: Cart) -> str:
 
 # Formatting a model may still add (bold/italic asterisks, headings, code marks, bullet dashes).
 # Replies are spoken aloud, so these would be read out as symbols.
-_FORMATTING = re.compile(r"[*#`]+|^[ \t]*[-•][ \t]+", re.MULTILINE)
+_FORMATTING = re.compile(r"[*#`_>]+|^[ \t]*[-•][ \t]+", re.MULTILINE)
 
 
 def _spoken_cart(cart: Cart, named: int = 2) -> str:
@@ -241,30 +218,10 @@ def _spoken_cart(cart: Cart, named: int = 2) -> str:
     return names[0] if len(names) == 1 else ", ".join(names[:-1]) + " and " + names[-1]
 
 
-def _text_of(event) -> str:
-    """The spoken text of an agent event, as plain text."""
-    if getattr(event, "partial", False):
-        return ""
-    return _FORMATTING.sub("", _raw_text(event)).strip()
-
-
-def _raw_text(event) -> str:
-    """All non-thought text in an event (a whole message, or a streamed piece of one)."""
-    if not event.content or not event.content.parts:
-        return ""
-    return "".join(part.text or "" for part in event.content.parts if not getattr(part, "thought", False))
-
-
 def _screen_from_state(state: dict) -> ScreenState:
-    by_id = {item.get("id"): item for item in state.get(state_keys.SHORTLIST) or []}
-    exact = set(state.get(state_keys.EXACT_MATCHES) or [])
-    all_exact = not state.get(state_keys.RELAXED)        # nothing was relaxed: every option matches
-    need = ShoppingNeed.model_validate(state.get(state_keys.NEED) or {})
+    need = state_keys.need(state)
     cards = []
-    for position, product_id in enumerate(state.get(state_keys.PRESENTED) or [], start=1):
-        if product_id not in by_id:
-            continue
-        product = Product.model_validate(by_id[product_id])
+    for position, product in enumerate(state_keys.presented(state), start=1):
         cards.append(ProductCard(
             id=product.id,
             position=position,
@@ -274,10 +231,10 @@ def _screen_from_state(state: dict) -> ScreenState:
             rating_count=product.rating_count,
             image_url=product.image_urls[0] if product.image_urls else None,
             summary=product.short_description,
-            exact_match=all_exact or product.id in exact,
+            exact_match=state_keys.is_exact(state, product.id),
             evidence=[EvidenceView(quote=e.quote, count=e.count_text(), heads_up=e.sentiment == "negative")
                       for e in _EVIDENCE.pick(product, need)],
         ))
-    cart = Cart.model_validate(state.get(state_keys.CART) or {})
+    cart = state_keys.cart(state)
     return ScreenState(products=cards, focus_product_id=state.get(state_keys.FOCUS_PRODUCT),
                        cart=CartView(items=cart.items, total=cart.total))

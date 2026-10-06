@@ -1,8 +1,6 @@
-const ORDINALS = ["First", "Second", "Third", "Fourth", "Fifth"];
+import { formatPrice } from "../format.js";
 
-function price(value) {
-  return value == null ? "Price not listed" : `$${value.toFixed(2)}`;
-}
+const ORDINALS = ["First", "Second", "Third", "Fourth", "Fifth"];
 
 export default function ProductList({ products, focusId, busy, onAsk }) {
   if (!products.length) {
@@ -54,7 +52,7 @@ export default function ProductList({ products, focusId, busy, onAsk }) {
                     {product.name}
                   </h3>
                   <p className="product__meta">
-                    <strong>{price(product.price)}</strong>
+                    <strong>{formatPrice(product.price)}</strong>
                     {product.rating != null && (
                       <span>
                         {" "}
