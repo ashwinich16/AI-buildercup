@@ -1,14 +1,16 @@
 import { useEffect, useRef } from "react";
 
 export default function Conversation({ messages, busy }) {
-  const endRef = useRef(null);
+  const boxRef = useRef(null);
 
+  // Keep the newest message in view by scrolling this box only (scrollIntoView would scroll the page too).
   useEffect(() => {
-    endRef.current?.scrollIntoView({ behavior: "smooth", block: "end" });
+    const box = boxRef.current;
+    if (box) box.scrollTop = box.scrollHeight;
   }, [messages, busy]);
 
   return (
-    <section className="conversation" aria-label="Conversation with Scout">
+    <section className="conversation" aria-label="Conversation with Scout" ref={boxRef}>
       <ol className="messages" role="list">
         {messages.map((message) => (
           <li key={message.id} className={`message message--${message.role}`}>
@@ -30,7 +32,6 @@ export default function Conversation({ messages, busy }) {
           </li>
         )}
       </ol>
-      <div ref={endRef} />
     </section>
   );
 }

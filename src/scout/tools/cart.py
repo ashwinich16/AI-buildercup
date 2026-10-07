@@ -17,6 +17,7 @@ class CartItem(BaseModel):
     product_id: str
     name: str
     price: Optional[float] = None
+    kind: Optional[str] = None          # e.g. "jeans": long titles are cut, and the kind must not be guessed
 
 
 class Cart(BaseModel):
@@ -27,7 +28,7 @@ class Cart(BaseModel):
         if any(item.product_id == product.id for item in self.items):
             return False
         self.items.append(CartItem(product_id=product.id, name=" ".join(product.title.split()[:10]),
-                                   price=product.price))
+                                   price=product.price, kind=product.kind or None))
         return True
 
     def remove(self, positions: list[int]) -> list[CartItem]:
@@ -52,7 +53,8 @@ class Cart(BaseModel):
     def to_prompt_text(self) -> str:
         if not self.items:
             return "The cart is empty."
-        lines = [f"{n}. {item.name} ({f'${item.price:.2f}' if item.price is not None else 'price not listed'})"
+        lines = [f"{n}. {item.kind + ': ' if item.kind else ''}{item.name} "
+                 f"({f'${item.price:.2f}' if item.price is not None else 'price not listed'})"
                  for n, item in enumerate(self.items, start=1)]
         note = " (some prices not listed)" if self.has_unpriced else ""
         lines.append(f"Total: ${self.total:.2f}{note}")

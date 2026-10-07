@@ -16,13 +16,13 @@ from dataclasses import dataclass
 from typing import Optional
 
 from google.api_core.client_options import ClientOptions
-from google.api_core.exceptions import InvalidArgument
+from google.api_core.exceptions import InvalidArgument, NotFound
 from google.cloud import discoveryengine_v1 as discoveryengine
 from google.protobuf.json_format import MessageToDict
 
 from scout.catalog.product_mapper import ProductMapper
 from scout.catalog.repository import CatalogRepository, SearchQuery
-from scout.config import Settings
+from scout.config import MissingSettingError, Settings
 from scout.domain import Product
 
 logger = logging.getLogger(__name__)
@@ -70,6 +70,18 @@ class VertexSearchCatalog(CatalogRepository):
 
         candidates = self._run_search(query.text, "", min(query.limit * 4, 50))
         return [p for p in candidates if query.matches(p)][: query.limit]
+
+    def get_product(self, product_id: str) -> Optional[Product]:
+        if not self._settings.search_data_store_id:
+            raise MissingSettingError("get_product needs SCOUT_SEARCH_DATA_STORE_ID")
+        name = (f"projects/{self._settings.project_id}/locations/{self._settings.search_location}"
+                f"/collections/default_collection/dataStores/{self._settings.search_data_store_id}"
+                f"/branches/default_branch/documents/{product_id}")
+        client = discoveryengine.DocumentServiceClient(client_options=self._client_options())
+        try:
+            return self._to_product(client.get_document(name=name))
+        except NotFound:
+            return None
 
     def categories(self) -> list[str]:
         if self._categories is None:        # the catalog rarely changes; ask once per process

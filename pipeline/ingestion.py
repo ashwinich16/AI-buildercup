@@ -255,7 +255,7 @@ def curate_reviews(reviews_iter, wanted_parent_asins: set):
         })
 
     final = []
-    for parent_asin, reviews in buffer.items():
+    for reviews in buffer.values():
         ranked = sorted(
             reviews,
             key=lambda r: (r["verified_purchase"] is True, r["helpful_vote"]),

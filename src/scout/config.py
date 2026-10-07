@@ -48,6 +48,7 @@ AGENT_TUNING_DEFAULTS = {
     "product_expert": AgentTuning(temperature=0.3, thinking_budget=1024),   # factual + visual
     "comparison": AgentTuning(temperature=0.2, thinking_budget=2048),       # deepest reasoning, consistent
     "preference": AgentTuning(temperature=0.2, thinking_budget=1024),       # runs after the reply: no rush
+    "recommender": AgentTuning(temperature=0.2, thinking_budget=0),         # which kinds go together (cached)
 }
 
 

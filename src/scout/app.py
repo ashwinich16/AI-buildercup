@@ -16,6 +16,7 @@ from scout.agents.product_expert import ProductExpertAgentBuilder
 from scout.catalog import CatalogRepository
 from scout.config import Settings, get_settings
 from scout.tools import CatalogOverviewBuilder, ImageFetcher, ProductReferenceResolver, ProductRetriever
+from scout.tools.recommendations import GeminiPairingAdvisor, Recommender
 
 
 def build_catalog(settings: Settings) -> CatalogRepository:
@@ -36,4 +37,5 @@ def build_root_agent(settings: Settings | None = None, catalog: CatalogRepositor
         retriever=ProductRetriever(catalog, limit=settings.search_result_limit),
         overview_builder=CatalogOverviewBuilder(catalog),
         resolver=ProductReferenceResolver(),
+        recommender=Recommender(catalog, GeminiPairingAdvisor(settings)),
     )

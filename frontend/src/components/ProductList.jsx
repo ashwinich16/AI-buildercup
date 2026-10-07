@@ -1,105 +1,176 @@
+import { useEffect } from "react";
 import { formatPrice } from "../format.js";
 
-const ORDINALS = ["First", "Second", "Third", "Fourth", "Fifth"];
+const ORDINALS = ["First", "Second", "Third", "Fourth", "Fifth", "Sixth"];
 
-export default function ProductList({ products, focusId, busy, onAsk }) {
-  if (!products.length) {
-    return (
-      <section className="panel" aria-labelledby="options-title">
-        <h2 id="options-title" className="panel__title">
-          Options
-        </h2>
-        <p className="muted">Tell Scout what you're looking for, and the options will appear here.</p>
-      </section>
-    );
-  }
+// Next steps once options are showing.
+const QUICK_ACTIONS = [
+  "Show me more options",
+  "Compare these for me",
+  "Something cheaper",
+  "Describe the first one",
+];
+
+export default function ProductList({ products, focusId, spokenPosition, busy, onAsk }) {
+  // Keep the option Scout is talking about in view: the one being described right now, else the focus.
+  const spokenId = products.find((p) => p.position === spokenPosition)?.id;
+  const inView = spokenId || focusId;
+  useEffect(() => {
+    if (inView) bringIntoView(document.getElementById(`card-${inView}`));
+  }, [inView]);
+
+  if (!products.length) return null;
 
   return (
-    <section className="panel" aria-labelledby="options-title">
-      <div className="panel__head">
-        <h2 id="options-title" className="panel__title">
-          Options ({products.length})
-        </h2>
-        {products.length > 1 && (
-          <button className="button button--quiet" disabled={busy} onClick={() => onAsk("Compare these options for me")}>
-            Compare
-          </button>
-        )}
+    <section className="results" aria-labelledby="results-title">
+      <div className="results__head">
+        <div>
+          <h2 id="results-title" className="results__title">
+            {products.length} {products.length === 1 ? "option" : "options"} for you.{" "}
+            <span className="muted">Picked from what you asked.</span>
+          </h2>
+          <p className="results__hint muted">Say "tell me about the first one", or use the buttons.</p>
+        </div>
       </div>
 
       <ol className="products" role="list">
-        {products.map((product) => {
-          const label = ORDINALS[product.position - 1] || `Option ${product.position}`;
-          return (
-            <li key={product.id}>
-              <article
-                className={`product ${product.id === focusId ? "is-focus" : ""}`}
-                aria-labelledby={`product-${product.id}`}
-              >
-                <div className="product__image">
-                  {product.image_url ? (
-                    <img src={product.image_url} alt={`Photo: ${product.summary}`} loading="lazy" />
-                  ) : (
-                    <span className="muted">No photo</span>
-                  )}
-                </div>
-                <div className="product__body">
-                  <p className="product__position">
-                    {label}
-                    {!product.exact_match && <span className="badge">Close match</span>}
-                  </p>
-                  <h3 id={`product-${product.id}`} className="product__name">
-                    {product.name}
-                  </h3>
-                  <p className="product__meta">
-                    <strong>{formatPrice(product.price)}</strong>
-                    {product.rating != null && (
-                      <span>
-                        {" "}
-                        · Rated {product.rating.toFixed(1)} of 5
-                        {product.rating_count ? ` (${product.rating_count} ratings)` : ""}
-                      </span>
-                    )}
-                  </p>
-                  {product.evidence?.length > 0 && (
-                    <div className="evidence">
-                      <p className="evidence__title" id={`evidence-${product.id}`}>
-                        What reviewers say
-                      </p>
-                      <ul className="evidence__list" aria-labelledby={`evidence-${product.id}`}>
-                        {product.evidence.map((item) => (
-                          <li key={item.quote} className={item.heads_up ? "evidence__item is-heads-up" : "evidence__item"}>
-                            {item.heads_up && <span className="evidence__flag">Heads-up: </span>}
-                            <q>{item.quote}</q> <span className="evidence__count">— {item.count}</span>
-                          </li>
-                        ))}
-                      </ul>
-                    </div>
-                  )}
-                  <div className="product__actions">
-                    <button
-                      className="button button--quiet"
-                      disabled={busy}
-                      onClick={() => onAsk(`Describe option ${product.position} in detail`)}
-                      aria-describedby={`product-${product.id}`}
-                    >
-                      Describe
-                    </button>
-                    <button
-                      className="button"
-                      disabled={busy}
-                      onClick={() => onAsk(`Add option ${product.position} to my cart`)}
-                      aria-describedby={`product-${product.id}`}
-                    >
-                      Add to cart
-                    </button>
-                  </div>
-                </div>
-              </article>
-            </li>
-          );
-        })}
+        {products.map((product) => (
+          <li key={product.id}>
+            <ProductCard
+              product={product}
+              focused={product.id === focusId}
+              speaking={product.id === spokenId}
+              busy={busy}
+              onAsk={onAsk}
+            />
+          </li>
+        ))}
       </ol>
+
+      <div className="quick">
+        <p className="quick__label" id="quick-label">
+          Next, you could ask:
+        </p>
+        <ul className="chips" role="list" aria-labelledby="quick-label">
+          {QUICK_ACTIONS.filter((action) => products.length > 1 || !action.startsWith("Compare")).map((action) => (
+            <li key={action}>
+              <button className="chip" disabled={busy} onClick={() => onAsk(action)}>
+                {action}
+              </button>
+            </li>
+          ))}
+        </ul>
+      </div>
     </section>
   );
+}
+
+function ProductCard({ product, focused, speaking, busy, onAsk }) {
+  const position = ORDINALS[product.position - 1] || `Option ${product.position}`;
+  const describe = () => onAsk(`Describe option ${product.position} in detail`);
+  // The strongest quote, plus a heads-up if reviewers flag one: enough to judge at a glance and keep
+  // the card short. The full review picture is one press away (Describe).
+  const evidence = product.evidence || [];
+  const shownEvidence = [evidence.find((e) => !e.heads_up), evidence.find((e) => e.heads_up)].filter(Boolean);
+
+  return (
+    <article
+      id={`card-${product.id}`}
+      className={`card ${focused ? "is-focus" : ""} ${speaking ? "is-speaking" : ""}`}
+      aria-current={speaking ? "true" : undefined}
+      aria-labelledby={`name-${product.id}`}
+    >
+      <button className="card__media" onClick={describe} disabled={busy} aria-label={`Describe ${position.toLowerCase()} option`}>
+        {product.image_url ? (
+          <img src={product.image_url} alt="" loading="lazy" />
+        ) : (
+          <span className="card__noimage">No photo</span>
+        )}
+        <span className="card__index" aria-hidden="true">
+          {product.position}
+        </span>
+        {!product.exact_match && (
+          <span className="card__tag" aria-hidden="true">
+            Close match
+          </span>
+        )}
+        {(speaking || focused) && (
+          <span className="card__talking" aria-hidden="true">
+            {speaking ? "Scout is describing this" : "Talking about this"}
+          </span>
+        )}
+      </button>
+
+      <div className="card__body">
+        <h3 id={`name-${product.id}`} className="card__name">
+          <span className="visually-hidden">
+            {position} option{product.exact_match ? "" : ", a close match"}:{" "}
+          </span>
+          {product.name}
+        </h3>
+
+        <p className="card__meta">
+          <span className={`card__price ${product.price == null ? "card__price--unknown" : ""}`}>
+            {formatPrice(product.price)}
+          </span>
+          {product.rating != null && (
+            <span
+              className="rating"
+              aria-label={`Rated ${product.rating.toFixed(1)} out of 5${
+                product.rating_count ? ` from ${product.rating_count.toLocaleString()} ratings` : ""
+              }`}
+            >
+              <span className="rating__star" aria-hidden="true">
+                ★
+              </span>
+              <span className="rating__value" aria-hidden="true">
+                {product.rating.toFixed(1)}
+              </span>
+              {product.rating_count ? <span aria-hidden="true">({product.rating_count.toLocaleString()})</span> : null}
+            </span>
+          )}
+        </p>
+
+        {shownEvidence.length > 0 && (
+          <ul className="evidence" aria-label="What reviewers say">
+            {shownEvidence.map((item) => (
+              <li key={item.quote} className={`evidence__item ${item.heads_up ? "is-heads-up" : ""}`}>
+                <span className="evidence__quote">
+                  {item.heads_up && <span className="evidence__flag">Heads-up: </span>}
+                  <q>{item.quote}</q>
+                </span>
+                <span className="evidence__count">{item.count}</span>
+              </li>
+            ))}
+          </ul>
+        )}
+
+        <div className="card__actions">
+          <button className="button button--secondary" disabled={busy} onClick={describe}>
+            Describe
+          </button>
+          <button className="button" disabled={busy} onClick={() => onAsk(`Add option ${product.position} to my cart`)}>
+            Add to cart
+          </button>
+        </div>
+      </div>
+    </article>
+  );
+}
+
+
+// Scroll the products panel (not the whole page) so the card is fully visible. On a phone the panel does
+// not scroll by itself, so there the page scrolls instead.
+function bringIntoView(card) {
+  const panel = card?.closest(".layout__shop");
+  if (!card || !panel) return;
+  if (panel.scrollHeight <= panel.clientHeight) {
+    card.scrollIntoView({ behavior: "smooth", block: "nearest" });
+    return;
+  }
+  const cardBox = card.getBoundingClientRect();
+  const panelBox = panel.getBoundingClientRect();
+  if (cardBox.top < panelBox.top || cardBox.bottom > panelBox.bottom) {
+    panel.scrollBy({ top: cardBox.top - panelBox.top - 16, behavior: "smooth" });
+  }
 }

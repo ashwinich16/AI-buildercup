@@ -26,7 +26,7 @@ from scout.agents import state_keys
 from scout.agents.elicitation import read_turn
 from scout.agents.model_io import content_text
 from scout.api.shopper_repository import ShopperMemory, ShopperRepository
-from scout.domain import Preference, PreferenceProfile
+from scout.domain import Preference, PreferenceProfile, Product
 from scout.tools import Cart, CartItem, EvidencePicker
 
 logger = logging.getLogger(__name__)
@@ -59,10 +59,21 @@ class CartView(BaseModel):
     total: float = 0.0
 
 
+class SuggestionCard(BaseModel):
+    """One item that goes with the cart ("goes well with your trousers")."""
+    name: str
+    price: Optional[float] = None
+    image_url: Optional[str] = None
+    goes_with: str = ""
+    kind: str = ""
+    reasons: list[str] = Field(default_factory=list)
+
+
 class ScreenState(BaseModel):
     products: list[ProductCard] = Field(default_factory=list)
     focus_product_id: Optional[str] = None
     cart: CartView = Field(default_factory=CartView)
+    suggestion: Optional[SuggestionCard] = None
 
 
 class ChatTurn(ScreenState):
@@ -74,6 +85,7 @@ class StartedSession(ScreenState):
     session_id: str
     greeting: str
     shopper_name: str = ""            # what Scout calls the shopper
+    categories: list[str] = Field(default_factory=list)   # what the shop sells: first things to ask for
 
 
 class ScoutChatService:
@@ -225,7 +237,7 @@ def _screen_from_state(state: dict) -> ScreenState:
         cards.append(ProductCard(
             id=product.id,
             position=position,
-            name=" ".join(product.title.split()[:9]),
+            name=_card_name(product),
             price=product.price,
             rating=product.rating,
             rating_count=product.rating_count,
@@ -237,4 +249,25 @@ def _screen_from_state(state: dict) -> ScreenState:
         ))
     cart = state_keys.cart(state)
     return ScreenState(products=cards, focus_product_id=state.get(state_keys.FOCUS_PRODUCT),
-                       cart=CartView(items=cart.items, total=cart.total))
+                       cart=CartView(items=cart.items, total=cart.total),
+                       suggestion=_suggestion_card(state))
+
+
+def _suggestion_card(state: dict) -> Optional[SuggestionCard]:
+    suggestion = state_keys.suggestion(state)
+    if suggestion is None:
+        return None
+    product = suggestion.product
+    return SuggestionCard(
+        name=_card_name(product),
+        price=product.price,
+        image_url=product.image_urls[0] if product.image_urls else None,
+        goes_with=suggestion.goes_with,
+        kind=product.kind or "item",
+        reasons=suggestion.reasons,
+    )
+
+
+def _card_name(product: Product) -> str:
+    """A product's title, short enough for a card."""
+    return " ".join(product.title.split()[:9])

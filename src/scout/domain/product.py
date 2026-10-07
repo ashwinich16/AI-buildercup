@@ -78,6 +78,11 @@ class Product(BaseModel):
     SHORT_FINDINGS_PER_ASPECT: ClassVar[int] = 3   # review findings per aspect in the compact prompt
 
     @property
+    def kind(self) -> str:
+        """What sort of product it is: its kind within the category, else the category ("" if unknown)."""
+        return self.product_type or self.category or ""
+
+    @property
     def short_description(self) -> str:
         """Best available short summary, falling back when enrichment is missing."""
         if self.spoken_summary_short:

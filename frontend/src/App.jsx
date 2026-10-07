@@ -1,20 +1,27 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { api, setCredentials } from "./api.js";
 import { earcons } from "./audio/earcons.js";
-import { useSpeaker, useSpeechInput, words } from "./hooks/useVoice.js";
+import { stripCues, useSpeaker, useSpeechInput, words } from "./hooks/useVoice.js";
 import SignIn from "./components/SignIn.jsx";
 import Header from "./components/Header.jsx";
-import Conversation from "./components/Conversation.jsx";
+import ScoutStage from "./components/ScoutStage.jsx";
 import Composer from "./components/Composer.jsx";
 import ProductList from "./components/ProductList.jsx";
-import CartPanel from "./components/CartPanel.jsx";
+import PairsWith from "./components/PairsWith.jsx";
+import CartSheet from "./components/CartSheet.jsx";
+import SettingsSheet from "./components/SettingsSheet.jsx";
 
-const EMPTY_SCREEN = { products: [], cart: { items: [], total: 0 }, focus_product_id: null };
+const EMPTY_SCREEN = { products: [], cart: { items: [], total: 0 }, focus_product_id: null, suggestion: null };
 // What to show, from any API response that carries it (session start, streamed screen, end of turn).
-const screenOf = ({ products, cart, focus_product_id }) => ({ products, cart, focus_product_id });
+const screenOf = ({ products, cart, focus_product_id, suggestion }) => ({ products, cart, focus_product_id, suggestion });
 const DEFAULT_SETTINGS = {
   voice: true, rate: 1, language: "en-IN", highContrast: false, largeText: false, headphones: false,
 };
+
+// The Scout panel beside the products can be dragged wider or narrower, within these limits (pixels).
+const DEFAULT_ASSISTANT_WIDTH = 400;
+const MIN_ASSISTANT_WIDTH = 320;
+const MAX_ASSISTANT_SHARE = 0.6;   // never more than this share of the window: the products need room too
 
 // Through speakers the microphone also hears Scout, so interrupting Scout takes a clear phrase
 // of the shopper's own words. With headphones there is no echo, so any word interrupts.
@@ -36,6 +43,10 @@ export default function App() {
   const [paused, setPaused] = useState(false);
   const [settings, setSettings] = useState(DEFAULT_SETTINGS);
   const [announcement, setAnnouncement] = useState("");
+  const [openSheet, setOpenSheet] = useState(null); // "cart", "settings" or null
+  const [spokenOption, setSpokenOption] = useState(null); // position of the option Scout is describing right now
+  const [assistantWidth, setAssistantWidth] = useState(DEFAULT_ASSISTANT_WIDTH); // the Scout panel, in pixels
+  const [categories, setCategories] = useState([]); // what the shop sells, offered as first things to ask for
 
   const speaker = useSpeaker();
   const { speak, startStream, stop: stopSpeaking, isEcho, audibleAt } = speaker;
@@ -60,6 +71,7 @@ export default function App() {
   // Show and say something; when finished, signal that it's the shopper's turn.
   const scoutSays = useCallback(
     (text, afterSpeaking = yourTurn) => {
+      text = stripCues(text);
       setMessages((all) => [...all, message("scout", text)]);
       setAnnouncement(text);
       if (settingsRef.current.voice) speak(text, settingsRef.current.rate, afterSpeaking);
@@ -72,10 +84,11 @@ export default function App() {
     async (text) => {
       if (!text || !sessionRef.current) return;
       if (busyRef.current) {
-        queuedRef.current = text; // Scout is still finishing (e.g. learning in the background): say it next
+        queuedRef.current = `${queuedRef.current || ""} ${text}`.trim(); // Scout is still finishing: say it next
         return;
       }
       stopSpeaking();
+      setSpokenOption(null);
       setPaused(false);
       setMessages((all) => [...all, message("shopper", text)]);
       busyRef.current = true;
@@ -86,10 +99,19 @@ export default function App() {
       const reply = message("scout", "");
       let shown = false;
       let afterSpeaking = yourTurn; // replaced below for "pause" and "end"
+      // While Scout describes an option, that card lights up ([[n]] cues in its words).
       const voice = settingsRef.current.voice
-        ? startStream(settingsRef.current.rate, () => afterSpeaking())
+        ? startStream(
+            settingsRef.current.rate,
+            () => {
+              setSpokenOption(null);
+              afterSpeaking();
+            },
+            setSpokenOption
+          )
         : null;
-      const showReply = (fullText) => {
+      const showReply = (rawText) => {
+        const fullText = stripCues(rawText);
         if (!shown) {
           shown = true;
           setMessages((all) => [...all, { ...reply, text: fullText }]);
@@ -104,7 +126,11 @@ export default function App() {
           if (item.type === "delta") {
             soFar += item.text;
             showReply(soFar);
-            voice?.push(item.text);
+            if (voice) voice.push(item.text);
+            else {
+              const cue = item.text.match(/\[\[(\d+)\]\]/);   // no voice: follow the text as it appears
+              if (cue) setSpokenOption(Number(cue[1]));
+            }
           } else if (item.type === "screen" || item.type === "done") {
             setScreen(screenOf(item));
           }
@@ -119,7 +145,7 @@ export default function App() {
             earcons.goodbye();
           };
         }
-        setAnnouncement(turn.reply);
+        setAnnouncement(stripCues(turn.reply));
         if (voice) voice.end();
         else afterSpeaking();
       } catch (error) {
@@ -177,8 +203,15 @@ export default function App() {
       setShopper({ ...signedIn, name: started.shopper_name || signedIn.name });
       setSessionId(started.session_id);
       setScreen(screenOf(started));
-      voiceInput.start(); // signing in is the click browsers need before using the microphone
-      scoutSays(started.greeting);
+      setCategories(started.categories || []);
+      if (signedIn.resumed) {
+        // After a refresh there has been no click yet, and browsers only allow sound and the microphone
+        // after one: show the greeting, and the orb ("Tap to talk") starts the conversation.
+        setMessages((all) => [...all, message("scout", started.greeting)]);
+      } else {
+        voiceInput.start(); // signing in is the click browsers need before using the microphone
+        scoutSays(started.greeting);
+      }
     } catch (error) {
       scoutSays(`I couldn't start our conversation: ${error.message}`);
     }
@@ -209,44 +242,134 @@ export default function App() {
 
   // Escape always silences Scout, wherever focus is.
   useEffect(() => {
-    const onKey = (event) => event.key === "Escape" && stopSpeaking();
+    const onKey = (event) => {
+      if (event.key !== "Escape") return;
+      stopSpeaking();
+      setSpokenOption(null);
+    };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
   }, [stopSpeaking]);
 
   if (!shopper) return <SignIn onSignedIn={startShopping} />;
 
+  const hasProducts = screen.products.length > 0;
+
   return (
     <div className="app">
       <a className="skip-link" href="#talk">
         Skip to talking with Scout
       </a>
-      <Header shopper={shopper} settings={settings} onSettingsChange={setSettings} onLeave={leave} />
+      <Header
+        shopper={shopper}
+        cartCount={screen.cart.items?.length || 0}
+        onOpenCart={() => setOpenSheet("cart")}
+        onOpenSettings={() => setOpenSheet("settings")}
+        onLeave={leave}
+      />
 
       {/* Screen readers hear Scout's replies here, unless Scout is already speaking them aloud. */}
       <div className="visually-hidden" aria-live={settings.voice ? "off" : "polite"}>
         {announcement}
       </div>
 
-      <main className="layout">
-        <div className="layout__chat" id="talk">
-          <Conversation messages={messages} busy={busy} />
-          <Composer
+      {/* Until there are products, Scout fills the page; then the products take the main area. */}
+      <main
+        className={`layout ${hasProducts ? "" : "layout--talk"}`}
+        style={{ "--assistant-width": `${assistantWidth}px` }}
+      >
+        {hasProducts && (
+          <section className="layout__shop" aria-label="Options">
+            <ProductList
+              products={screen.products}
+              focusId={screen.focus_product_id}
+              spokenPosition={spokenOption}
+              busy={busy || !sessionId}
+              onAsk={send}
+            />
+            <PairsWith suggestion={screen.suggestion} busy={busy} onAsk={send} />
+          </section>
+        )}
+        {hasProducts && <PanelResizer width={assistantWidth} onResize={setAssistantWidth} />}
+
+        <aside className="layout__assistant" id="talk" aria-label="Talk with Scout">
+          <ScoutStage
+            messages={messages}
+            busy={busy}
+            speaking={speaker.speaking}
+            paused={paused}
+            ready={Boolean(sessionId)}
             voiceInput={voiceInput}
+            empty={!hasProducts}
+            starters={categories}
+            onToggleListening={toggleListening}
+            onAsk={send}
+          />
+          <Composer
             speaking={speaker.speaking}
             busy={busy}
             paused={paused}
             ready={Boolean(sessionId)}
+            voiceInput={voiceInput}
             onToggleListening={toggleListening}
             onSend={send}
-            onStopSpeaking={stopSpeaking}
+            onStopSpeaking={() => {
+              stopSpeaking();
+              setSpokenOption(null);
+            }}
           />
-        </div>
-        <aside className="layout__side" aria-label="Options and cart">
-          <ProductList products={screen.products} focusId={screen.focus_product_id} busy={busy} onAsk={send} />
-          <CartPanel cart={screen.cart} busy={busy} onAsk={send} />
         </aside>
       </main>
+
+      <CartSheet
+        open={openSheet === "cart"}
+        onClose={() => setOpenSheet(null)}
+        cart={screen.cart}
+        suggestion={screen.suggestion}
+        busy={busy}
+        onAsk={send}
+      />
+      <SettingsSheet
+        open={openSheet === "settings"}
+        onClose={() => setOpenSheet(null)}
+        settings={settings}
+        onSettingsChange={setSettings}
+      />
     </div>
+  );
+}
+
+// The bar between the products and Scout: drag it, or focus it and use the arrow keys, to resize Scout's panel.
+function PanelResizer({ width, onResize }) {
+  const clamp = (value) =>
+    Math.round(Math.min(Math.max(value, MIN_ASSISTANT_WIDTH), window.innerWidth * MAX_ASSISTANT_SHARE));
+
+  const startDrag = (event) => {
+    event.currentTarget.setPointerCapture(event.pointerId);
+  };
+  const drag = (event) => {
+    if (event.currentTarget.hasPointerCapture(event.pointerId)) onResize(clamp(window.innerWidth - event.clientX));
+  };
+  const onKey = (event) => {
+    const step = { ArrowLeft: 32, ArrowRight: -32 }[event.key];   // left makes Scout's panel wider
+    if (!step) return;
+    event.preventDefault();
+    onResize(clamp(width + step));
+  };
+
+  return (
+    <div
+      className="resizer"
+      role="separator"
+      aria-orientation="vertical"
+      aria-label="Resize the conversation panel"
+      aria-valuenow={width}
+      aria-valuemin={MIN_ASSISTANT_WIDTH}
+      tabIndex={0}
+      onPointerDown={startDrag}
+      onPointerMove={drag}
+      onKeyDown={onKey}
+      onDoubleClick={() => onResize(DEFAULT_ASSISTANT_WIDTH)}
+    />
   );
 }

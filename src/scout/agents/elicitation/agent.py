@@ -49,6 +49,7 @@ Intent = Literal[
     "more_options",       # wants other options for the same need
     "choose",             # has decided on a product (Scout adds it to the cart)
     "cart",               # wants to hear, change or check out their cart
+    "see_suggestion",     # wants to see other items like the one Scout suggested to go with their cart
     "pause",              # wants Scout to stop talking or wait, without ending the conversation
     "end_conversation",   # wants to finish the conversation for now
     "reject",             # does not like a presented product
@@ -75,6 +76,9 @@ class TurnUnderstanding(BaseModel):
     product_positions: list[int] = Field(
         default_factory=list, max_length=10, description="For compare: numbers of the products to compare; empty means all presented")
     reason: Optional[str] = Field(default=None, description="For choose/reject: why, in the shopper's words")
+    about_suggestion: bool = Field(
+        default=False, description="True when the product they mean is the ITEM SCOUT SUGGESTED to go with "
+                                   "their cart, not one of the presented options")
     cart_action: Optional[Literal["view", "remove", "clear", "checkout"]] = Field(
         default=None, description="For cart: what they want to do with it; clear = take everything out")
     cart_positions: list[int] = Field(
@@ -114,15 +118,23 @@ WHAT YOU KNOW ABOUT THIS SHOPPER (from earlier conversations)
 THEIR CART
 {cart}
 
+ITEM SCOUT SUGGESTED TO GO WITH THEIR CART
+{suggestion}
+
 FOR THE SHOPPER'S NEW MESSAGE
 
 1. intent: decide what the shopper is trying to achieve right now.
    - shop: they are describing, changing or narrowing down what they want, including a short reply that answers your last question.
-   - more_options: they want to hear different or additional options for the same need, without changing the need. Do not ask a question; Scout will present the next options.
+   - more_options: they want to hear different or additional options for the same need, without changing the need. Do not ask a question; Scout will present the next options. If they also change what they want (a price limit, a colour, a detail), it is still more_options: update the need with the change.
    - ask_about_product: they want one presented product described (including its look, picture or photo), or have a question about it. Scout CAN look at product photos, so this is never impossible.
    - compare: they want two or more presented products compared.
    - choose: they have decided on a product they want to buy.
    - cart: they want to hear what is in their cart, take one or more things out of it, empty it, or finish and pay.
+   - The ITEM SCOUT SUGGESTED (above, if any) is a product they can act on just like the presented ones. When the product they mean is that item, set about_suggestion true, keep the need unchanged, ready_to_search false, no question, and pick the intent by what they want to do with it:
+       choose: have it added to the cart. If Scout offered it in its last reply, a plain yes means choose.
+       ask_about_product: a question about it, or to hear it described.
+       see_suggestion: to see other items like it.
+       reject: they do not want it. Write reply: a short, easy-going acknowledgement (no pressure, and invite what is next).
    - reject: they do not like a presented product.
    - pause: they want Scout to stop talking, be quiet or wait for a moment, without leaving.
    - end_conversation: they want to finish talking for now or say goodbye.
@@ -130,7 +142,8 @@ FOR THE SHOPPER'S NEW MESSAGE
 
 2. need: return the COMPLETE updated need. Keep everything already known; add or change only what this message says. Never invent details. category must be one of the catalog categories, or null. When the shopper names a kind of product, use the categories in WHAT THE SHOP ACTUALLY HAS as a strong hint for which catalog category it belongs to.
    product_types: the specific kind(s) they want, spelled exactly as in PRODUCT TYPES IN THE SHOP. Fill it only when their words clearly mean one of those kinds. A general word that people use for several of the shop's kinds leaves product_types empty. When they accept another kind you offered, add it.
-   gender: whose STYLE the item is, and only from what the shopper says. Naming the style, or naming the person it is for, settles it; saying it does not matter means "any". Never infer it from their name, voice, way of talking, profile, or from who is talking: an item they want for themselves does NOT settle it, because anyone can shop for any style. When they move on to a different kind of product, keep the gender only if they make clear it is for the same person.
+   purpose: the occasion or use, in their words. When it points to particular kinds the shop has for that person (see "Kinds of ..." in WHAT THE SHOP ACTUALLY HAS), also put those kinds in product_types, so the search looks for the right kind.
+   gender: whose STYLE the item is, and only from what the shopper says. Naming the style, or naming the person it is for, settles it; saying it does not matter means "any". Never infer it from their name, voice, way of talking, profile, or from who is talking: an item they want for themselves does NOT settle it, because anyone can shop for any style. When they move on to a different kind of product, keep the gender only if they make clear it is for the same person. When your last question asked whose style it is, a reply that names a style answers it: set gender from it, even when the reply is only a few words.
    must_have: every specific quality they ask the product to have, in plain words a product description would use. When they ask for a different value of a quality they already gave, it replaces the old one.
 
 3. Decide whether the need is clear. Think about it like a friend would:
@@ -140,7 +153,9 @@ FOR THE SHOPPER'S NEW MESSAGE
    - Budget is helpful but never required.
    - Use what you know about this shopper: never ask what their profile already answers, and add their relevant stated or confident preferences to the need (taste to must_have or avoid, their size or fit, their usual budget) unless this message says otherwise. One exception: who the item is for. People often shop for someone else, so even when their profile says whose style they usually buy, check it for each new item, offering that style as the likely answer.
    - Who it is for is unclear when gender is null and "Made for" in WHAT THE SHOP ACTUALLY HAS includes both men's and women's items. It then comes FIRST in still_unclear, because it changes every product you would pick. When the matches are all one style or unisex, it is not unclear.
-   - The kind is unclear when product_types is empty and the shopper's words could mean several kinds the shop has for that person (see "Kinds of ..." in WHAT THE SHOP ACTUALLY HAS). It comes right after who it is for.
+   - What it is for (the occasion or use) is unclear when need.purpose is empty and the use would change which products you pick, unless the shopper said it does not matter or named a kind that already implies the use. It decides the kind, the style and what matters most, so ask it right after who it is for, before showing anything. Ask about the occasion rather than listing kinds: the occasion usually settles the kind.
+   - The kind is unclear only when product_types is empty and, even with the occasion known, the shopper's words could still mean very different kinds the shop has for that person (see "Kinds of ..." in WHAT THE SHOP ACTUALLY HAS). Then ask it after the occasion.
+   - Usually that is all: who it is for, what it is for, and the kind if still open. Do not ask about details the shopper has not brought up unless the options really differ by them.
    ready_to_search is true when still_unclear is empty, or when the shopper signals they want to see products now rather than answer more questions.
 
 4. If not ready, ask ONE question about the first item in still_unclear. Think like a friend who knows this exact product:
@@ -158,7 +173,7 @@ FOR THE SHOPPER'S NEW MESSAGE
 
 6. understood: one short, friendly sentence restating what they want now.
 
-7. For ask_about_product, compare, more_options or choose: keep the need unchanged, ready_to_search false, no question; fill product_reference with the shopper's own words, and reason for choose.
+7. For ask_about_product, compare, more_options or choose: keep the need unchanged (for more_options, apart from what this message changes), ready_to_search false, no question; fill product_reference with the shopper's own words, and reason for choose.
    product_position: the number of the product they mean in PRODUCTS YOU JUST PRESENTED, however they describe it (by position, a feature, price, colour, or by pointing back to the one being discussed). If it truly could be more than one, or none, set it to null; Scout will ask.
    product_positions (compare only): the numbers of the products they want compared, however they describe them. Leave empty when they mean all of the presented options.
 
@@ -218,6 +233,7 @@ class ElicitationAgentBuilder:
             presented=_presented_products(state),
             profile=state_keys.profile(state).to_prompt_text(),
             cart=state_keys.cart(state).to_prompt_text(),
+            suggestion=_suggestion_text(state),
         )
 
     # ADK calls this after the model answers; the agent keeps its own state up to date.
@@ -249,6 +265,7 @@ class ElicitationAgentBuilder:
             requested.append(turn.unavailable_category)
             state[state_keys.REQUESTED_CATEGORIES] = requested   # honest: the request really is noted
 
+        self._settle_suggestion(state, turn)
         turn.need.product_types = self._known_types(turn.need.product_types)
         turn.need.gender = self._kept_gender(state, turn.need)
         message = content_text(callback_context.user_content, separator=" ")
@@ -278,6 +295,17 @@ class ElicitationAgentBuilder:
         if need.gender is None and previous.gender and previous.category == need.category:
             return previous.gender
         return need.gender
+
+    @staticmethod
+    def _settle_suggestion(state, turn: TurnUnderstanding) -> None:
+        """The suggested item can only be meant while one is open, and acting on it never starts a search."""
+        if state_keys.suggestion(state) is None:
+            turn.about_suggestion = False
+        if turn.about_suggestion:
+            turn.ready_to_search = False
+            turn.question = None
+            if turn.intent in ("shop", "more_options", "other"):   # about the item, but not choose/ask/reject:
+                turn.intent = "see_suggestion"                     # show it with a few like it
 
     def _grounded_avoid(self, state, turn: TurnUnderstanding, message: str) -> list[str]:
         """Things to avoid hide products, so each one must come from the shopper: their words now (or their
@@ -347,6 +375,16 @@ def read_turn(state) -> Optional[TurnUnderstanding]:
     except ValueError as error:
         logger.warning("Could not read the turn understanding: %s", error)
         return None
+
+
+def _suggestion_text(state) -> str:
+    suggestion = state_keys.suggestion(state)
+    if suggestion is None:
+        return "none"
+    product = suggestion.product
+    offered = " Scout offered it in its last reply." if state.get(state_keys.OFFER_OPEN) else ""
+    return (f"{' '.join(product.title.split()[:10])} (a {product.kind}, "
+            f"goes with their {suggestion.goes_with}).{offered}")
 
 
 def _gender_question(need: ShoppingNeed) -> str:

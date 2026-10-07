@@ -10,6 +10,7 @@ from typing import Optional
 
 from scout.domain import PreferenceProfile, Product, ShoppingNeed
 from scout.tools.cart import Cart
+from scout.tools.recommendations import Suggestion
 
 # Current conversation
 NEED = "need"                        # ShoppingNeed as a dict, built up over the conversation
@@ -32,6 +33,12 @@ NARRATION_TASK = "narration_task"    # what the Narration agent should speak nex
 
 # Cart and preferences
 CART_EVENT = "cart_event"            # what just happened to the cart, for Narration to speak
+SUGGESTION = "suggestion"            # one item that goes with the cart (Recommender), or None
+SUGGESTED_IDS = "suggested_ids"      # every product suggested this conversation: never suggest one twice
+SUGGESTED_KINDS = "suggested_kinds"  # kinds already suggested: never offer the same kind twice
+OFFER_OPEN = "offer_open"            # Scout offered the suggestion in its LAST reply, so a plain "yes" answers it
+OFFER_AT_CHECKOUT = "offer_at_checkout"  # that offer came at checkout: declining it means "check me out"
+CHECKOUT_REMINDED = "checkout_reminded"  # the one reminder before checkout was already given
 PREFERENCE_EVIDENCE = "preference_evidence"  # what the Preference agent should learn from this turn
 
 # What Scout remembers about the shopper. Loaded from the ShopperRepository (Cloud SQL)
@@ -79,3 +86,9 @@ def focus(state) -> Optional[Product]:
 def is_exact(state, product_id: str) -> bool:
     """Does this product match everything the shopper asked for? (Nothing relaxed means all of them do.)"""
     return not state.get(RELAXED) or product_id in set(state.get(EXACT_MATCHES) or [])
+
+
+def suggestion(state) -> Optional[Suggestion]:
+    """The item Scout suggested to go with the cart, if one is open."""
+    raw = state.get(SUGGESTION)
+    return Suggestion.model_validate(raw) if raw else None

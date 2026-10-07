@@ -1,68 +1,53 @@
-export default function Header({ shopper, settings, onSettingsChange, onLeave }) {
-  const set = (key, value) => onSettingsChange({ ...settings, [key]: value });
+import { useEffect, useRef, useState } from "react";
+import Icon from "./Icons.jsx";
+
+export default function Header({ shopper, cartCount, onOpenCart, onOpenSettings, onLeave }) {
+  // A small bump on the cart count when something is added, so the change is noticed.
+  const [bumped, setBumped] = useState(false);
+  const previous = useRef(cartCount);
+  useEffect(() => {
+    const added = cartCount > previous.current;
+    previous.current = cartCount;
+    if (!added) return undefined;
+    setBumped(true);
+    const timer = setTimeout(() => setBumped(false), 400);
+    return () => clearTimeout(timer);
+  }, [cartCount]);
+
+  const items = `${cartCount} ${cartCount === 1 ? "item" : "items"}`;
 
   return (
     <header className="header">
       <div className="header__brand">
-        <span className="brand">Scout</span>
-        {shopper.name && <span className="muted header__who">Shopping as {shopper.name}</span>}
+        <span className="brand">
+          <span className="brand__mark" aria-hidden="true" />
+          Scout
+        </span>
+        {shopper.name && <span className="header__who muted">Shopping as {shopper.name}</span>}
       </div>
 
-      <div className="header__controls" role="group" aria-label="Display and voice settings">
-        <label className="toggle">
-          <input type="checkbox" checked={settings.voice} onChange={(e) => set("voice", e.target.checked)} />
-          <span>Scout speaks replies</span>
-        </label>
-
-        <label className="toggle">
-          <input
-            type="checkbox"
-            checked={settings.headphones}
-            onChange={(e) => set("headphones", e.target.checked)}
-          />
-          <span>Using headphones (interrupt Scout with any word)</span>
-        </label>
-
-        <label className="select">
-          <span>Listening language</span>
-          <select value={settings.language} onChange={(e) => set("language", e.target.value)}>
-            <option value="en-IN">English (India)</option>
-            <option value="en-US">English (US)</option>
-            <option value="en-GB">English (UK)</option>
-            <option value="hi-IN">Hindi</option>
-            <option value="te-IN">Telugu</option>
-            <option value="ta-IN">Tamil</option>
-          </select>
-        </label>
-
-        <label className="select">
-          <span>Speech speed</span>
-          <select value={settings.rate} onChange={(e) => set("rate", Number(e.target.value))}>
-            <option value={0.85}>Slower</option>
-            <option value={1}>Normal</option>
-            <option value={1.2}>Faster</option>
-            <option value={1.45}>Fastest</option>
-          </select>
-        </label>
-
-        <label className="toggle">
-          <input
-            type="checkbox"
-            checked={settings.highContrast}
-            onChange={(e) => set("highContrast", e.target.checked)}
-          />
-          <span>High contrast</span>
-        </label>
-
-        <label className="toggle">
-          <input type="checkbox" checked={settings.largeText} onChange={(e) => set("largeText", e.target.checked)} />
-          <span>Larger text</span>
-        </label>
-
-        <button className="button button--quiet" onClick={onLeave}>
+      <nav className="header__actions" aria-label="Cart and settings">
+        <button className="icon-button" onClick={onOpenCart} aria-label={`Cart, ${items}`}>
+          <Icon name="bag" />
+          <span className="header__label" aria-hidden="true">
+            Cart
+          </span>
+          {cartCount > 0 && (
+            <span className={`icon-button__count ${bumped ? "is-bumped" : ""}`} aria-hidden="true">
+              {cartCount}
+            </span>
+          )}
+        </button>
+        <button className="icon-button" onClick={onOpenSettings} aria-label="Settings">
+          <Icon name="settings" />
+          <span className="header__label" aria-hidden="true">
+            Settings
+          </span>
+        </button>
+        <button className="button button--ghost" onClick={onLeave}>
           {shopper.leave.label}
         </button>
-      </div>
+      </nav>
     </header>
   );
 }

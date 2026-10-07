@@ -89,6 +89,7 @@ class CloudSqlShopperRepository(ShopperRepository):
             added_at    TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
             PRIMARY KEY (user_id, product_id)
         )""",
+        "ALTER TABLE cart_item ADD COLUMN IF NOT EXISTS kind TEXT",   # added later; older tables lack it
     ]
 
     def __init__(self, connect: Callable[[], object]):
@@ -124,9 +125,9 @@ class CloudSqlShopperRepository(ShopperRepository):
             for a, v, s, p, src, c, e in cursor.fetchall()
         ]
         cursor.execute(
-            "SELECT product_id, name, price FROM cart_item WHERE user_id = %s ORDER BY position", (user_id,))
-        items = [CartItem(product_id=pid, name=name, price=None if price is None else float(price))
-                 for pid, name, price in cursor.fetchall()]
+            "SELECT product_id, name, price, kind FROM cart_item WHERE user_id = %s ORDER BY position", (user_id,))
+        items = [CartItem(product_id=pid, name=name, price=None if price is None else float(price), kind=kind)
+                 for pid, name, price, kind in cursor.fetchall()]
 
         return ShopperMemory(
             known=True,
@@ -177,10 +178,11 @@ class CloudSqlShopperRepository(ShopperRepository):
                                (user_id, product_id))
         for position, item in enumerate(items, start=1):
             cursor.execute(
-                "INSERT INTO cart_item (user_id, product_id, name, price, position) VALUES (%s, %s, %s, %s, %s) "
+                "INSERT INTO cart_item (user_id, product_id, name, price, kind, position) "
+                "VALUES (%s, %s, %s, %s, %s, %s) "
                 "ON CONFLICT (user_id, product_id) DO UPDATE SET "
-                "name = EXCLUDED.name, price = EXCLUDED.price, position = EXCLUDED.position",
-                (user_id, item.product_id, item.name, item.price, position))
+                "name = EXCLUDED.name, price = EXCLUDED.price, kind = EXCLUDED.kind, position = EXCLUDED.position",
+                (user_id, item.product_id, item.name, item.price, item.kind, position))
 
     # ----- connection handling -----
 

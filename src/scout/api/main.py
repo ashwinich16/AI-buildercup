@@ -96,9 +96,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     async def start_session(body: StartRequest, shopper: Shopper = Depends(current_shopper)) -> StartedSession:
         persona = personas.get(shopper.id)
         try:
-            return await chat.start_session(shopper.id, shopper.first_name,
-                                            persona.preferences if persona else None,
-                                            preferred_name=body.preferred_name.strip())
+            started = await chat.start_session(shopper.id, shopper.first_name,
+                                               persona.preferences if persona else None,
+                                               preferred_name=body.preferred_name.strip())
+            return started.model_copy(update={"categories": await asyncio.to_thread(catalog.categories)})
         except Exception:
             logger.exception("Could not start a conversation for %s", shopper.id)
             raise HTTPException(status_code=503, detail="I can't reach your saved cart and preferences "

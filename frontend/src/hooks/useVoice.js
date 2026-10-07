@@ -43,6 +43,10 @@ function looksLikeEcho(heard, spokenText, threshold = 0.6) {
 // recogniser late; later than that, it is the shopper answering.
 const ECHO_TAIL_MS = 1200;
 
+// The browser splits speech into pieces at every short pause. Pieces are joined into one sentence, which
+// is sent only once the shopper has been quiet this long, so Scout hears the whole thing at once.
+const END_OF_SENTENCE_MS = 1100;
+
 // Listening: the browser's speech recognition, kept open for the whole conversation
 // (no start-up delay between turns). It restarts itself if the browser closes it.
 // `language` is the shopper's accent/language, e.g. "en-IN", "hi-IN".
@@ -57,11 +61,21 @@ export function useSpeechInput({ language, onInterim, onFinal }) {
   const activeRef = useRef(false);
   const recognitionRef = useRef(null);
   const utteranceStartRef = useRef(null); // when the phrase being recognised started (first partial result)
+  const sentenceRef = useRef({ text: "", startedAt: null }); // pieces heard so far, not yet sent
+  const sentenceTimerRef = useRef(null);
   const launchRef = useRef(null);
   const languageRef = useRef(language);
   languageRef.current = language;
   const handlers = useRef({});
   handlers.current = { onInterim, onFinal };
+
+  // The shopper has finished: hand over the whole sentence.
+  const finishSentence = () => {
+    clearTimeout(sentenceTimerRef.current);
+    const { text, startedAt } = sentenceRef.current;
+    sentenceRef.current = { text: "", startedAt: null };
+    if (text) handlers.current.onFinal?.(text, startedAt);
+  };
 
   launchRef.current = () => {
     if (!Recognition || recognitionRef.current || !activeRef.current) return;
@@ -79,15 +93,20 @@ export function useSpeechInput({ language, onInterim, onFinal }) {
         if (result.isFinal) {
           const startedAt = utteranceStartRef.current ?? Date.now();
           utteranceStartRef.current = null;
-          if (text) handlers.current.onFinal?.(text, startedAt);
+          const sentence = sentenceRef.current;
+          if (text) sentenceRef.current = { text: `${sentence.text} ${text}`.trim(), startedAt: sentence.startedAt ?? startedAt };
         } else {
           interimText += `${text} `;
         }
       }
-      setInterim(interimText.trim());
+      const heardSoFar = `${sentenceRef.current.text} ${interimText}`.trim();
+      setInterim(heardSoFar);
+      clearTimeout(sentenceTimerRef.current);   // still talking: wait for the pause at the end
       if (interimText.trim()) {
         utteranceStartRef.current ??= Date.now();
-        handlers.current.onInterim?.(interimText.trim(), utteranceStartRef.current);
+        handlers.current.onInterim?.(heardSoFar, sentenceRef.current.startedAt ?? utteranceStartRef.current);
+      } else if (sentenceRef.current.text) {
+        sentenceTimerRef.current = setTimeout(finishSentence, END_OF_SENTENCE_MS);
       }
     };
     recognition.onerror = (event) => {
@@ -98,6 +117,7 @@ export function useSpeechInput({ language, onInterim, onFinal }) {
       }
     };
     recognition.onend = () => {
+      finishSentence();                          // the browser stopped listening: send what was heard
       recognitionRef.current = null;
       utteranceStartRef.current = null;
       setHearing(false);
@@ -123,6 +143,8 @@ export function useSpeechInput({ language, onInterim, onFinal }) {
   const stop = useCallback(() => {
     activeRef.current = false;
     setActive(false);
+    clearTimeout(sentenceTimerRef.current);
+    sentenceRef.current = { text: "", startedAt: null };   // paused: nothing half-heard is sent
     recognitionRef.current?.stop();
   }, []);
 
@@ -144,8 +166,13 @@ export function useSpeechInput({ language, onInterim, onFinal }) {
 const FIRST_CHUNK_MIN_WORDS = 4;   // "Oh!" alone is too short to be worth its own request
 const LATER_CHUNK_CHARS = 150;     // later chunks: a couple of sentences each
 
-// The backend already removes formatting symbols from Scout's replies; here only spacing is tidied.
-const forSpeech = (text) => (text || "").replace(/\s+/g, " ").trim();
+// Scout marks where it starts talking about each option with [[2]] (never shown or spoken), so the
+// screen can light up that option while it is being described.
+const CUE = /\[\[(\d+)\]\]/;
+export const stripCues = (text) => (text || "").replace(/\s*\[\[\d+\]\]\s*/g, " ").replace(/ {2,}/g, " ");
+
+// The backend already removes formatting symbols from Scout's replies; here only cues and spacing are tidied.
+const forSpeech = (text) => stripCues(text).replace(/\s+/g, " ").trim();
 
 // Where the complete sentences in `text` end: after . ! ? followed by a space ("$12.99" stays whole).
 function completeSentencesEnd(text) {
@@ -191,8 +218,9 @@ export function useSpeaker() {
 
   // Start speaking a reply that is still being written. Returns { push(text), end() }.
   // onFinished runs once everything pushed has been spoken (not if Scout is interrupted).
+  // onCue(n) runs when Scout starts speaking the part marked [[n]] (the option it is describing).
   const startStream = useCallback(
-    (rate = 1, onFinished) => {
+    (rate = 1, onFinished, onCue) => {
       stop();
       const requestId = requestIdRef.current;
       const current = () => requestId === requestIdRef.current;
@@ -200,25 +228,40 @@ export function useSpeaker() {
       let pending = "";        // text received but not yet sent for synthesis
       let chunksSent = 0;
       let ended = false;
-      const audio = [];        // promises of synthesised chunks, in speaking order
+      const audio = [];        // { blob: promise, cue }, in speaking order
       let wake = null;         // resolves when a new chunk is queued or the reply ends
 
       const queue = (text) => {
         const clean = forSpeech(text);
         if (!clean) return;
-        audio.push(api.speech(clean, rate).catch(() => null));
+        const cue = text.match(CUE)?.[1];
+        audio.push({ blob: api.speech(clean, rate).catch(() => null), cue: cue ? Number(cue) : null });
         chunksSent += 1;
         wake?.();
       };
 
+      // Send what is ready for synthesis. A cue always starts a new chunk, so the highlight moves to an
+      // option exactly when Scout starts talking about it.
       const flush = () => {
-        const end = ended ? pending.length : completeSentencesEnd(pending);
-        const ready = pending.slice(0, end);
-        const enough = ended
-          || (chunksSent === 0 ? words(ready).length >= FIRST_CHUNK_MIN_WORDS : ready.length >= LATER_CHUNK_CHARS);
-        if (ready.trim() && enough) {
+        for (;;) {
+          const cueAt = pending.slice(1).search(CUE) + 1;              // a cue after the start of the text
+          let end = ended ? pending.length : completeSentencesEnd(pending);
+          let forced = false;
+          if (cueAt > 0 && (ended || cueAt <= end || pending.slice(0, cueAt).trim().match(/[.!?…:]["')\]]*$/))) {
+            end = cueAt;
+            forced = true;
+          }
+          const ready = pending.slice(0, end);
+          const enough = ended || forced
+            || (chunksSent === 0 ? words(ready).length >= FIRST_CHUNK_MIN_WORDS : ready.length >= LATER_CHUNK_CHARS);
+          if (!ready.trim() && forced) {          // only spacing before a cue: drop it and carry on
+            pending = pending.slice(end);
+            continue;
+          }
+          if (!ready.trim() || !enough) return;
           queue(ready);
           pending = pending.slice(end);
+          if (!forced && !ended) return;
         }
       };
 
@@ -227,7 +270,8 @@ export function useSpeaker() {
           while (next >= audio.length && !ended) await new Promise((resolve) => (wake = resolve));
           if (!current()) return;                       // interrupted
           if (next >= audio.length) break;              // everything has been spoken
-          const blob = await audio[next];
+          const { blob: pendingBlob, cue } = audio[next];
+          const blob = await pendingBlob;
           if (!current()) return;
           if (!blob) continue;                          // one failed chunk: carry on with the rest
           if (!activeRef.current) {
@@ -235,6 +279,7 @@ export function useSpeaker() {
             startedAtRef.current = Date.now();
             setSpeaking(true);
           }
+          if (cue) onCue?.(cue);
           await playChunk(blob, requestId);
         }
         if (activeRef.current) endedAtRef.current = Date.now();
@@ -246,7 +291,7 @@ export function useSpeaker() {
       return {
         push(text) {
           if (!current() || ended) return;
-          spokenTextRef.current += text;
+          spokenTextRef.current += stripCues(text);
           pending += text;
           flush();
         },

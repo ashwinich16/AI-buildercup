@@ -49,6 +49,13 @@ class ProductRetriever:
         self._target = target    # stop topping up once the shortlist has this many
         self._few = few          # below this many, offer the other kinds the shop has
 
+    @staticmethod
+    def fits(need: ShoppingNeed, product: Product) -> bool:
+        """Does the product keep the need's firm limits (kind, whose style, budget)? Used to drop
+        products found earlier once the shopper tightens the need ("under $70")."""
+        return SearchQuery(category=need.category, product_types=need.product_types, gender=need.gender_filter(),
+                           max_price=need.budget_max).matches(product)
+
     def find(self, need: ShoppingNeed, exclude_ids: Optional[set[str]] = None) -> RetrievalResult:
         """Exact matches first, topped up with related products. `exclude_ids` skips products already shown."""
         excluded = set(exclude_ids or ())
@@ -62,8 +69,14 @@ class ProductRetriever:
             if collected and "budget" in relaxed:
                 break                          # never trade the budget away just to top up
             seen = excluded | {p.id for p in collected}
-            hits = [p for p in self._without_avoided(self._catalog.search(query), need.avoid)
-                    if p.id not in seen]
+            # Some listings are the same product under another id (a size or colour variant with the same
+            # title); presenting it twice wastes one of the three options.
+            seen_titles = {_title_key(p.title) for p in collected}
+            hits = []
+            for p in self._without_avoided(self._catalog.search(query), need.avoid):
+                if p.id not in seen and _title_key(p.title) not in seen_titles:
+                    hits.append(p)
+                    seen_titles.add(_title_key(p.title))
             if not hits:
                 continue
             if relaxed:
@@ -225,3 +238,8 @@ def word_stems(text: str) -> set[str]:
                 break
         stems.add(word)
     return stems
+
+
+def _title_key(title: str) -> str:
+    """Titles compared without case, punctuation or bracketed notes such as a size or colour."""
+    return re.sub(r"[^a-z0-9]+", "", re.sub(r"[\(\[].*?[\)\]]", " ", (title or "").lower()))[:60]

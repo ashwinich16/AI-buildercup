@@ -1,10 +1,14 @@
 import { useEffect, useRef, useState } from "react";
 import { api, demoCredentials, firebaseCredentials } from "../api.js";
+import Icon from "./Icons.jsx";
 
 // The start screen. The backend says how shoppers sign in (/api/auth-config):
 //   demo     -> pick one of the demo shoppers
 //   firebase -> Sign in with Google
-// Either way it hands App a shopper: { name, preferredName, credentials, leave: { label, action } }.
+// Either way it hands App a shopper: { name, preferredName, credentials, leave: { label, action }, resumed }.
+// After a page refresh the shopper is still signed in (`resumed`), so the start screen is skipped:
+//   firebase -> Firebase keeps the Google sign-in itself
+//   demo     -> the chosen shopper is in the page address (#shopper=<id>), so a refresh keeps it
 export default function SignIn({ onSignedIn }) {
   const [config, setConfig] = useState(null);
   const [error, setError] = useState("");
@@ -19,6 +23,7 @@ export default function SignIn({ onSignedIn }) {
     <main className="picker" aria-labelledby="picker-title">
       <div className="picker__intro">
         <p className="brand brand--large" aria-hidden="true">
+          <span className="brand__mark" />
           Scout
         </p>
         <h1 id="picker-title" tabIndex={-1} ref={headingRef}>
@@ -45,13 +50,32 @@ export default function SignIn({ onSignedIn }) {
   );
 }
 
+const SHOPPER_IN_ADDRESS = /^#shopper=(.+)$/;
+
 function DemoShoppers({ personas, onSignedIn }) {
-  const pick = (persona) =>
+  const pick = (persona, resumed = false) => {
+    window.history.replaceState(null, "", `#shopper=${encodeURIComponent(persona.id)}`);
     onSignedIn({
       name: persona.name,
       credentials: demoCredentials(persona.id),
-      leave: { label: "Switch shopper", action: async () => {} },
+      leave: {
+        label: "Switch shopper",
+        action: async () => window.history.replaceState(null, "", window.location.pathname + window.location.search),
+      },
+      resumed,
     });
+  };
+
+  // A refresh keeps the shopper chosen before it (once: React may run this effect twice in development).
+  const resumedRef = useRef(false);
+  useEffect(() => {
+    const id = decodeURIComponent(window.location.hash.match(SHOPPER_IN_ADDRESS)?.[1] || "");
+    const persona = personas.find((p) => p.id === id);
+    if (persona && !resumedRef.current) {
+      resumedRef.current = true;
+      pick(persona, true);
+    }
+  }, [personas]);
 
   return (
     <ul className="picker__list" role="list">
@@ -65,6 +89,7 @@ function DemoShoppers({ personas, onSignedIn }) {
               <span className="persona__name">{persona.name}</span>
               <span className="persona__description">{persona.description}</span>
             </span>
+            <Icon name="arrow" className="icon persona__arrow" />
           </button>
         </li>
       ))}
@@ -88,24 +113,35 @@ function GoogleSignIn({ settings, onSignedIn, onError }) {
   const [callMe, setCallMe] = useState(""); // optional; Scout remembers it, empty = name from Google
   const [user, setUser] = useState(undefined); // undefined = still checking, null = signed out
 
-  useEffect(() => {
-    let unsubscribe = () => {};
-    connectFirebase(settings)
-      .then((connected) => {
-        setFirebase(connected);
-        unsubscribe = connected.onUserChanged(setUser);
-      })
-      .catch(() => onError("Sign-in isn't available right now. Please try again later."));
-    return () => unsubscribe();
-  }, [settings, onError]);
-
-  const start = (signedInUser) =>
+  const start = (signedInUser, connected = firebase, resumed = false) =>
     onSignedIn({
       name: callMe.trim() || signedInUser.displayName || "",
       preferredName: callMe.trim(),
       credentials: firebaseCredentials(signedInUser),
-      leave: { label: "Sign out", action: firebase.signOut },
+      leave: { label: "Sign out", action: connected.signOut },
+      resumed,
     });
+
+  useEffect(() => {
+    let unsubscribe = () => {};
+    let cancelled = false;   // React may run this effect twice in development: only the last one listens
+    let firstCheck = true;   // Firebase says right away whether this browser is still signed in
+    connectFirebase(settings)
+      .then((connected) => {
+        if (cancelled) return;
+        setFirebase(connected);
+        unsubscribe = connected.onUserChanged((signedInUser) => {
+          setUser(signedInUser);
+          if (firstCheck && signedInUser) start(signedInUser, connected, true);   // a refresh: carry on
+          firstCheck = false;
+        });
+      })
+      .catch(() => onError("Sign-in isn't available right now. Please try again later."));
+    return () => {
+      cancelled = true;
+      unsubscribe();
+    };
+  }, [settings, onError]);
 
   const signIn = async () => {
     try {

@@ -33,6 +33,7 @@ class NarrationTask(str, Enum):
     NO_MORE_OPTIONS = "no_more_options"   # the shopper asked for more, but there are none
     SPEAK_COMPARISON = "speak_comparison"  # speak the Comparison agent's analysis
     CART_UPDATE = "cart_update"           # confirm what happened to the cart
+    CHECKOUT_REMINDER = "checkout_reminder"  # before checkout: the one item they might have forgotten
 
 
 PRESENT_OPTIONS = """{voice}
@@ -51,10 +52,11 @@ YOUR TASK
 Present these options in about 80 to 120 words:
 1. Start with a short, natural reaction.
 2. Be honest about matches. Options marked [exact match] have everything they asked for. Options marked [related] do not: say so plainly and kindly, name what they lack, and say what they DO offer for this shopper's need.
-3. Lead with the best option and WHY it suits what they want, plus one detail that helps them picture it. Back the why with ONE short quote from its review evidence, said naturally together with how many of the reviews say it. Quote only the evidence given, word for word.
+3. Lead with the best option and WHY it suits what they want, plus one detail that helps them picture it. Back the why with ONE short quote from its review evidence, said naturally with how many reviews say it (for example, that three of ten reviewers say it). Quote only the evidence given, word for word.
 4. Then each other option in one sentence, with the one way it differs.
 5. Mention a review point only if it matters for their need.
 6. Make the order clear as you speak (first, second...) so they can refer back.
+Screen cue: right before you start talking about an option, write its tag, [[1]] for Option 1, [[2]] for Option 2, and so on (the option numbers below). Tags are never spoken; they light up that option on screen while you describe it. Write each tag once, at the start of the sentence that begins that option.
 7. End with ONE easy question offering a useful next step (such as hearing one described, comparing, or hearing more).
 If there are no options, say so kindly and suggest one thing they could change.
 """
@@ -72,6 +74,7 @@ NEXT OPTIONS TO PRESENT
 
 YOUR TASK
 Make clear these are additional options, then present them: honest about [exact match] vs [related], one sentence each with what makes it different, making their order clear so they can refer back. About 60 to 100 words. End with ONE easy question.
+Screen cue: right before you start talking about an option, write its tag, [[1]] for Option 1, [[2]] for Option 2, and so on (the option numbers below). Tags are never spoken; they light up that option on screen while you describe it. Write each tag once, at the start of the sentence that begins that option.
 """
 
 NO_MORE_OPTIONS = """{voice}
@@ -109,7 +112,7 @@ WHAT JUST HAPPENED
 
 THEIR CART NOW
 {cart}
-
+{suggestion}
 YOUR TASK
 In one to three short sentences, tell them clearly what happened and where things stand:
 - Added: confirm what you added, using a short spoken name, and the cart total.
@@ -120,6 +123,22 @@ In one to three short sentences, tell them clearly what happened and where thing
 - Viewing: list the items with prices and the total. If empty, say so warmly.
 - Checkout: read back the items and total, then say honestly that payment is not connected in this prototype yet, and that their cart is saved.
 Then offer ONE useful next step. Never invent items or prices.
+Refer to cart items by the kind given, never by a guessed kind.
+If a SUGGESTION is given above, end with it instead of another next step: in one natural sentence, the way a friend in a shop would, mention that item, say why it goes with what they just chose (only the reasons given), and ask whether you should add it to their cart or tell them more about it first. Never mention any other item.
+"""
+
+
+CHECKOUT_REMINDER = """{voice}
+They asked to check out. Before they do, there is one item that would complete what is in their cart:
+
+SUGGESTION
+{suggestion}
+
+THEIR CART
+{cart}
+
+YOUR TASK
+In one or two short, natural sentences, like a helpful friend at the till: say that before they check out they might like this one item, why it goes with what they chose (only the reasons given), and ask whether you should add it, tell them more about it, or go ahead and check out. Do not read back the cart or the total yet.
 """
 
 
@@ -134,6 +153,7 @@ class NarrationAgentBuilder:
             NarrationTask.NO_MORE_OPTIONS: self._no_more_options_prompt,
             NarrationTask.SPEAK_COMPARISON: self._speak_comparison_prompt,
             NarrationTask.CART_UPDATE: self._cart_update_prompt,
+            NarrationTask.CHECKOUT_REMINDER: self._checkout_reminder_prompt,
         }
 
     def build(self) -> LlmAgent:
@@ -193,9 +213,23 @@ class NarrationAgentBuilder:
         return SPEAK_COMPARISON.format(voice=VOICE, need=state_keys.need(state).summary(), comparison=text)
 
     def _cart_update_prompt(self, state: dict) -> str:
+        event = state.get(state_keys.CART_EVENT) or {}
+        suggestion = state_keys.suggestion(state)
+        offer = ""
+        if suggestion and event.get("action") == "added":   # only right after adding, never when removing
+            offer = f"\nSUGGESTION (one item that goes with what they just added)\n{suggestion.to_prompt_text()}\n"
         return CART_UPDATE.format(
             voice=VOICE,
-            event=json.dumps(state.get(state_keys.CART_EVENT) or {}, ensure_ascii=False),
+            event=json.dumps(event, ensure_ascii=False),
+            cart=state_keys.cart(state).to_prompt_text(),
+            suggestion=offer,
+        )
+
+    def _checkout_reminder_prompt(self, state: dict) -> str:
+        suggestion = state_keys.suggestion(state)
+        return CHECKOUT_REMINDER.format(
+            voice=VOICE,
+            suggestion=suggestion.to_prompt_text() if suggestion else "None.",
             cart=state_keys.cart(state).to_prompt_text(),
         )
 

@@ -5,7 +5,8 @@ A voice-first shopping companion for blind and low-vision shoppers, built on Goo
 
 Scout talks with the shopper like a friend: it asks a few questions to understand the need, searches the
 catalog, describes options vividly, answers questions about a product (including what its photos show),
-compares products, keeps a cart, and remembers lasting preferences. The conversation is hands-free:
+compares products, keeps a cart, suggests one item that goes with what the shopper chose, and remembers
+lasting preferences. The conversation is hands-free:
 the browser listens, Google Cloud Text-to-Speech speaks, and short chimes signal whose turn it is.
 
 ## Repository layout
@@ -16,7 +17,7 @@ conversationalAgent/
 │   ├── config.py, app.py        settings and the composition root (wires every agent)
 │   ├── domain/                  Product, ShoppingNeed, PreferenceProfile
 │   ├── catalog/                 CatalogRepository + Vertex AI Search implementation
-│   ├── tools/                   retrieval, catalog overview, cart, images, review evidence
+│   ├── tools/                   retrieval, catalog overview, cart, images, review evidence, recommendations
 │   ├── agents/                  orchestrator, elicitation, narration, product_expert, comparison, preference
 │   │                            (+ state_keys.py: shared session state; model_io.py: model input/output)
 │   └── api/                     FastAPI web API: auth, chat sessions, speech, demo personas
@@ -24,7 +25,7 @@ conversationalAgent/
 │   └── src/
 │       ├── hooks/useVoice.js    listening (browser speech recognition) and speaking (Cloud TTS)
 │       ├── audio/earcons.js     the "your turn" / "thinking" / "paused" chimes
-│       ├── components/          sign-in, header settings, conversation, products, cart
+│       ├── components/          sign-in, header, Scout stage, products, "goes well with", cart and settings sheets
 │       └── format.js            how prices are shown
 ├── pipeline/                    offline data jobs (ingestion, gender, product_type, enrich, review_evidence,
 │                                export) + common.py: settings, Cloud SQL, Gemini, photos shared by all of them
@@ -178,8 +179,8 @@ run `DELETE FROM product_intelligence;` first.
 |---|---|
 | `GOOGLE_CLOUD_PROJECT`, `GOOGLE_CLOUD_LOCATION`, `GOOGLE_GENAI_USE_VERTEXAI` | Gemini on Vertex AI |
 | `SCOUT_AGENT_MODEL` | default model for every agent |
-| `SCOUT_<AGENT>_MODEL / _TEMPERATURE / _THINKING_BUDGET` | per-agent tuning (elicitation, narration, product_expert, comparison, preference) |
-| `SCOUT_SEARCH_LOCATION`, `SCOUT_SEARCH_ENGINE_ID` or `SCOUT_SEARCH_DATA_STORE_ID` | Vertex AI Search |
+| `SCOUT_<AGENT>_MODEL / _TEMPERATURE / _THINKING_BUDGET` | per-agent tuning (elicitation, narration, product_expert, comparison, preference, recommender) |
+| `SCOUT_SEARCH_LOCATION`, `SCOUT_SEARCH_ENGINE_ID` or `SCOUT_SEARCH_DATA_STORE_ID` | Vertex AI Search (the data store id is also needed to look up saved cart items for the checkout suggestion) |
 | `SCOUT_AUTH_MODE` | `demo` (persona picker) or `firebase` (real sign-in) |
 | `SCOUT_TTS_VOICE` | Cloud Text-to-Speech voice |
 | `SCOUT_DB_INSTANCE`, `SCOUT_DB_NAME`, `SCOUT_DB_USER`, `SCOUT_DB_PASSWORD_SECRET` | Cloud SQL: the pipeline, and Scout's memory of each shopper (tables `shopper`, `user_preference`, `cart_item`, created automatically). Empty instance = memory only, lost on restart |
