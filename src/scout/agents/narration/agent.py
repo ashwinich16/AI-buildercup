@@ -251,7 +251,11 @@ def _search_note(state: dict) -> str:
     if "everything" in relaxed:
         note = "SEARCH NOTE: nothing matched at all."
     elif "budget" in relaxed:
-        note = "SEARCH NOTE: nothing fit their budget, so these may cost more than they wanted. Say so."
+        budget = state_keys.need(state).budget_max
+        limit = f"under ${budget:.0f}" if budget is not None else "within their budget"
+        note = (f"SEARCH NOTE: the shop has no {_kind(state)} {limit}. Start by saying exactly that, plainly, in one "
+                "short sentence. These are the closest prices above it, cheapest first: present them as that, "
+                "with each price.")
     elif relaxed:
         note = ("SEARCH NOTE: options marked [related] do not match every detail they asked for; "
                 "they are the closest alternatives in the shop.")

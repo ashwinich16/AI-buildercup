@@ -21,6 +21,7 @@ It depends only on the CatalogRepository interface, so any catalog works.
 
 import re
 from collections import Counter
+from concurrent.futures import ThreadPoolExecutor
 from functools import cache
 from typing import Callable, Optional
 
@@ -65,7 +66,11 @@ class ProductRetriever:
         relaxed_for_rest: list[str] = []
 
         within_budget: set[str] = set()
-        for relaxed, query in self._attempts(need):
+        attempts = self._attempts(need)
+        # All searches at once: when little fits (nothing under the budget), waiting for each in turn was slow.
+        with ThreadPoolExecutor(max_workers=len(attempts) or 1) as pool:
+            found = list(pool.map(lambda attempt: self._catalog.search(attempt[1]), attempts))
+        for (relaxed, _query), results in zip(attempts, found):
             if collected and "budget" in relaxed:
                 break                          # never trade the budget away just to top up
             seen = excluded | {p.id for p in collected}
@@ -73,7 +78,7 @@ class ProductRetriever:
             # title); presenting it twice wastes one of the three options.
             seen_titles = {_title_key(p.title) for p in collected}
             hits = []
-            for p in self._without_avoided(self._catalog.search(query), need.avoid):
+            for p in self._without_avoided(results, need.avoid):
                 if p.id not in seen and _title_key(p.title) not in seen_titles:
                     hits.append(p)
                     seen_titles.add(_title_key(p.title))
@@ -100,6 +105,9 @@ class ProductRetriever:
             collected.sort(key=lambda p: (p.id not in exact_ids, -met[p.id]))   # stable: search order otherwise
             if len(exact_ids) < len(collected):
                 relaxed_for_rest = relaxed_for_rest or ["details"]
+
+        if "budget" in relaxed_for_rest:   # nothing within budget: the closest prices above it first
+            collected.sort(key=lambda p: (p.price is None, p.price or 0))
 
         other_types = self._other_types(need) if need.product_types and len(collected) < self._few else []
         if not collected:
