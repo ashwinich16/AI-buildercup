@@ -81,12 +81,13 @@ class TurnUnderstanding(BaseModel):
     about_suggestion: bool = Field(
         default=False, description="True when the product they mean is the ITEM SCOUT SUGGESTED to go with "
                                    "their cart, not one of the presented options")
-    outfit_action: Optional[Literal["start", "skip", "add_extra", "finish", "add_to_cart"]] = Field(
+    outfit_action: Optional[Literal["start", "skip", "add_extra", "finish", "add_to_cart", "leave"]] = Field(
         default=None, description="For outfit: start a new one, skip the piece being chosen, accept the extra piece "
-                                  "Scout offered, finish without more pieces, or put the whole outfit in the cart")
-    leaves_outfit: bool = Field(
-        default=False, description="True when an outfit is in progress but this message is about something else, "
-                                   "not about putting that outfit together")
+                                  "Scout offered, finish without more pieces, put the whole outfit in the cart, or "
+                                  "leave outfit planning for regular shopping")
+    outfit_drop: list[str] = Field(
+        default_factory=list, max_length=MAX_PIECES,
+        description="While an outfit is in progress: catalog categories they say they do not want in it")
     outfit_pieces: list[str] = Field(
         default_factory=list, max_length=MAX_PIECES,
         description="For outfit start: the catalog categories they asked to have in it; empty if they did not say")
@@ -159,7 +160,11 @@ FOR THE SHOPPER'S NEW MESSAGE
        add_extra: they accept the extra piece Scout offered to finish the look.
        finish: they decline the extra piece, or say the outfit is complete.
        add_to_cart: they want the whole outfit put in their cart.
-     While an outfit is in progress, picking one of the presented options is choose, and asking for cheaper or different options for the piece is shop as usual. Styling is not always what they want: when a message is about something other than this outfit, set leaves_outfit true and handle it as you normally would.
+       leave: they want to stop planning the outfit and go back to regular shopping.
+     While an outfit is in progress (above), they are planning it until they ask to leave:
+       - Naming one of the presented options in any way (its number, colour, pattern, a detail) is choose: it goes into the outfit.
+       - Asking for a different kind of piece, or cheaper or different options, is shop as usual: the search is for the outfit.
+       - When they say they do not want a piece (even while asking for another one instead), put its category in outfit_drop.
    - pause: they want Scout to stop talking, be quiet or wait for a moment, without leaving.
    - end_conversation: they want to finish talking for now or say goodbye.
    - other: anything else.
@@ -342,7 +347,7 @@ class ElicitationAgentBuilder:
         the pieces, so no other question is asked. The answer ("women's") reads like ordinary shopping, so a
         request waiting on that question carries on into the reply, unless the shopper moved on."""
         requested = state.get(state_keys.OUTFIT_REQUESTED)
-        if requested and turn.intent in ("shop", "other") and not turn.leaves_outfit:
+        if requested and turn.intent in ("shop", "other"):
             turn.intent, turn.outfit_action = "outfit", "start"
             turn.outfit_pieces = turn.outfit_pieces or requested.get("pieces", [])
         if turn.intent == "outfit" and turn.outfit_action == "start":

@@ -968,6 +968,13 @@ button {
   letter-spacing: -0.015em;
   white-space: pre-line;
 }
+.stage__ways {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: 12px;
+  margin-top: 8px;
+}
 .stage__starters {
   text-transform: capitalize;
   margin-top: 8px;

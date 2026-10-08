@@ -106,8 +106,10 @@ class ScoutOrchestrator(BaseAgent):
         turn = read_turn(ctx.session.state)
         if ctx.session.state.get(state_keys.OFFER_OPEN):   # the offer was answered (or passed over) just now
             yield self._update_state(ctx, {state_keys.OFFER_OPEN: False})
-        if turn is not None and turn.leaves_outfit and ctx.session.state.get(state_keys.OUTFIT):
-            yield self._update_state(ctx, {state_keys.OUTFIT: None})   # they moved on: back to normal shopping
+        outfit = state_keys.outfit(ctx.session.state)
+        if turn is not None and outfit is not None and turn.outfit_drop:   # pieces they don't want in it
+            outfit.drop(turn.outfit_drop)
+            yield self._update_state(ctx, {state_keys.OUTFIT: outfit.model_dump()})
         if turn is None:
             yield self._say(ctx, "Sorry, I didn't quite catch that. Could you say it another way?")
             return
@@ -178,8 +180,10 @@ class ScoutOrchestrator(BaseAgent):
     # -----------------------------------------------------------------
 
     async def _search_and_narrate(self, ctx: InvocationContext, skip_seen: bool = False,
-                                  task: NarrationTask = NarrationTask.PRESENT_OPTIONS):
+                                  task: Optional[NarrationTask] = None):
+        """Search for the need and present the results (as part of the outfit, while one is being planned)."""
         state = ctx.session.state
+        task = task or (NarrationTask.OUTFIT_STEP if state.get(state_keys.OUTFIT) else NarrationTask.PRESENT_OPTIONS)
         need = state_keys.need(state)
         seen = set(state.get(state_keys.SEEN) or []) if skip_seen else set()
         result = await asyncio.to_thread(self.retriever.find, need, seen)
@@ -295,7 +299,8 @@ class ScoutOrchestrator(BaseAgent):
             return
 
         outfit = state_keys.outfit(ctx.session.state)
-        if suggested is None and outfit is not None and outfit.pick(product):   # a piece of the outfit
+        if suggested is None and outfit is not None:   # planning an outfit: picks go into it, not the cart
+            outfit.pick(product)
             yield self._evidence("chose", product, turn.reason)
             async for item in self._outfit_step(ctx, outfit):
                 yield item
@@ -380,6 +385,10 @@ class ScoutOrchestrator(BaseAgent):
         elif action == "add_to_cart":
             async for item in self._add_outfit_to_cart(ctx, outfit):
                 yield item
+            return
+        elif action == "leave":
+            yield self._update_state(ctx, {state_keys.OUTFIT: None})
+            yield self._say(ctx, "Sure, we'll leave the outfit there. What would you like to shop for?")
             return
         elif action == "skip" and outfit.current() is not None:
             outfit.skip_current()

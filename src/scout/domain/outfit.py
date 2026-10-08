@@ -61,18 +61,31 @@ class Outfit(BaseModel):
     def total(self) -> float:
         return sum(product.price or 0 for product in self.chosen())
 
-    def pick(self, product: Product) -> bool:
-        """Put the product in a piece still to choose that it belongs to (the current one first).
-        False if it fits none, e.g. once every piece is picked: then it is an ordinary choice."""
-        current = self.current()
-        if current is None:
-            return False
-        open_pieces = [current] + [i for i, picked in enumerate(self.picked) if picked is None and i != current]
-        for i in open_pieces:
-            if self.plan.pieces[i].category.lower() == (product.category or "").lower():
-                self.picked[i] = product
-                return True
-        return False
+    def pick(self, product: Product) -> None:
+        """Everything picked while planning goes into the outfit: into its piece (one still to choose first,
+        else replacing the earlier pick of that piece), or as a new piece if the plan did not have it."""
+        same = [i for i, piece in enumerate(self.plan.pieces)
+                if piece.category.lower() == (product.category or "").lower()]
+        still_open = [i for i in same if self.picked[i] is None]
+        if same:
+            self.picked[(still_open or same)[0]] = product
+        else:
+            self.plan.pieces.append(OutfitPiece(category=product.category or product.kind, looks_like=product.kind,
+                                                why="the shopper's own pick"))
+            self.picked.append(product)
+        # It is in the outfit now, so it is no longer an extra to offer.
+        self.plan.extras = [p for p in self.plan.extras if p.category.lower() != (product.category or "").lower()]
+
+    def drop(self, categories: list[str]) -> None:
+        """The shopper does not want these pieces in the outfit (picked or not), nor offered as extras."""
+        unwanted = {c.lower() for c in categories}
+        kept = [(piece, product) for piece, product in zip(self.plan.pieces, self.picked)
+                if piece.category.lower() not in unwanted]
+        self.plan.pieces = [piece for piece, _ in kept]
+        self.picked = [product for _, product in kept]
+        self.plan.extras = [piece for piece in self.plan.extras if piece.category.lower() not in unwanted]
+        if self.offered_extra and self.offered_extra.category.lower() in unwanted:
+            self.offered_extra = None
 
     def skip_current(self) -> None:
         index = self.current()

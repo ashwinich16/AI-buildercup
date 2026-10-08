@@ -282,8 +282,9 @@ class NarrationAgentBuilder:
 
     def _outfit_step_prompt(self, state: dict) -> str:
         outfit = state_keys.outfit(state)
-        index = outfit.current() if outfit else None
-        piece = outfit.plan.pieces[index] if index is not None else None
+        need = state_keys.need(state)
+        # The piece these options are for: the plan's piece of that kind, or what they asked for instead.
+        piece = next((p for p in outfit.plan.pieces if p.category == need.category), None) if outfit else None
         if outfit and not outfit.introduced:
             opening = ("Start by sharing the plan in one or two sentences: the pieces you would put together for "
                        "this occasion and why, and that you will start with this piece. Mention the pieces that "
@@ -295,7 +296,7 @@ class NarrationAgentBuilder:
             cue=SCREEN_CUE,
             voice=VOICE,
             outfit=outfit.to_prompt_text() if outfit else "None.",
-            piece=f"{piece.category}: {piece.looks_like} ({piece.why})" if piece else "None.",
+            piece=f"{piece.category}: {piece.looks_like} ({piece.why})" if piece else need.summary(),
             search_note=_search_note(state),
             products=_presented_text(state),
             opening=opening,

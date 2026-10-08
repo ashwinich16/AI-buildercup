@@ -40,6 +40,9 @@ export default function OutfitStrip({ outfit, busy, onAsk, onTryOn }) {
         >
           Try the outfit on
         </button>
+        <button className="button button--ghost" disabled={busy} onClick={() => onAsk("Let's leave the outfit and just shop")}>
+          Back to regular shopping
+        </button>
       </div>
     </section>
   );

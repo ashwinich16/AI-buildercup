@@ -237,10 +237,14 @@ def _greeting(name: str, returning: bool, cart: Cart) -> str:
     hello = f", {name}" if name else ""
     if returning:
         waiting = f" You still have {_spoken_cart(cart)} in your cart." if cart.items else ""
-        return f"Welcome back{hello}!{waiting} What are we shopping for today?"
+        return f"Welcome back{hello}!{waiting} {_TWO_WAYS}"
     return (f"Hi{' ' + name if name else ''}! I'm Scout, your shopping companion. Just talk to me naturally, and interrupt me "
             "whenever you like. When you hear a soft chime, it's your turn to speak. "
-            "What are you shopping for today?")
+            f"{_TWO_WAYS}")
+
+
+# The two ways to shop with Scout, offered at the start of every conversation.
+_TWO_WAYS = "Shall we plan an outfit together for an occasion, or are you shopping for something in particular?"
 
 
 # Formatting a model may still add (bold/italic asterisks, headings, code marks, bullet dashes).

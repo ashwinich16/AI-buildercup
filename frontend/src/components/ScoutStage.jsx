@@ -101,6 +101,20 @@ export default function ScoutStage({ messages, busy, speaking, paused, ready, vo
           lastScout && <p className="stage__scout">{lastScout.text}</p>
         )}
 
+        {empty && (
+          <div className="stage__ways" role="group" aria-label="How would you like to shop?">
+            <button className="button" disabled={busy || !ready} onClick={() => onAsk("I'd like to plan an outfit")}>
+              Plan an outfit
+            </button>
+            <button
+              className="button button--secondary"
+              disabled={busy || !ready}
+              onClick={() => onAsk("I'm shopping for something in particular")}
+            >
+              Regular shopping
+            </button>
+          </div>
+        )}
         {empty && starters.length > 0 && (
           <ul className="chips stage__starters" role="list" aria-label="Try saying">
             {starters.map((starter) => (
