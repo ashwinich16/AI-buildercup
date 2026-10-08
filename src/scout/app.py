@@ -13,6 +13,7 @@ from scout.agents.narration import NarrationAgentBuilder
 from scout.agents.orchestrator import ScoutOrchestrator
 from scout.agents.preference import PreferenceAgentBuilder
 from scout.agents.product_expert import ProductExpertAgentBuilder
+from scout.agents.stylist import StylistAgentBuilder
 from scout.catalog import CatalogRepository
 from scout.config import Settings, get_settings
 from scout.tools import CatalogOverviewBuilder, ImageFetcher, ProductReferenceResolver, ProductRetriever
@@ -34,6 +35,7 @@ def build_root_agent(settings: Settings | None = None, catalog: CatalogRepositor
         product_expert=ProductExpertAgentBuilder(settings, images).build(),
         comparison=ComparisonAgentBuilder(settings, images).build(),
         preference=PreferenceAgentBuilder(settings).build(),
+        stylist=StylistAgentBuilder(settings, catalog).build(),
         retriever=ProductRetriever(catalog, limit=settings.search_result_limit),
         overview_builder=CatalogOverviewBuilder(catalog),
         resolver=ProductReferenceResolver(),

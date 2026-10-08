@@ -111,6 +111,12 @@
   box-sizing: border-box;
 }
 
+/* Slim scroll bars in the theme's colours. */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: var(--line) transparent;
+}
+
 body {
   margin: 0;
   background: var(--bg);
@@ -899,6 +905,21 @@ button {
   border-left: 0;
   background: var(--bg);
 }
+/* On a wide screen: one scroll bar, at the right edge of the screen, and the text box stays at the bottom.
+   (A phone scrolls the whole page, with the text box pinned; see the 960px rules.) */
+@media (min-width: 961px) {
+  .layout--talk .layout__assistant {
+    overflow-y: auto;
+  }
+  .layout--talk .composer {
+    position: sticky;
+    bottom: 0;
+  }
+  .stage--hero .history .conversation {
+    max-height: none;
+    overflow: visible;
+  }
+}
 
 .stage {
   flex: 1;
@@ -958,7 +979,7 @@ button {
   max-width: 760px;
   margin: 0 auto;
   padding-top: clamp(28px, 9vh, 96px);
-  overflow-y: auto;            /* the opened conversation scrolls here, never under the text box */
+  flex: none;                  /* natural height: the whole panel scrolls (see .layout--talk below) */
 }
 .stage--hero .stage__caption {
   flex: none;
@@ -1015,11 +1036,6 @@ button {
 }
 .orb:hover:not(:disabled) .orb__core {
   transform: scale(1.03);
-}
-.orb__core .icon {
-  width: 34%;
-  height: 34%;
-  stroke-width: 1.6;
 }
 .orb--listening .orb__core,
 .orb--thinking .orb__core,
@@ -1082,39 +1098,70 @@ button {
   }
 }
 
-/* Speaking: sound bars. */
-.orb__bars {
-  display: flex;
-  align-items: center;
-  gap: 6%;
-  height: 40%;
+/* Scout's face (see ScoutFace in ScoutStage.jsx) */
+.face {
+  width: 72%;
+  height: 72%;
+  overflow: visible;
 }
-.orb__bars span {
-  width: calc(var(--orb) * 0.055);
-  height: 100%;
-  border-radius: 999px;
-  background: currentColor;
-  animation: bar 0.9s ease-in-out infinite;
+.face__eyes,
+.face__eye,
+.face__talk {
+  transform-box: fill-box;
   transform-origin: center;
 }
-.orb__bars span:nth-child(2) {
-  animation-delay: -0.6s;
+.face__eye {
+  fill: currentColor;
+  animation: blink 4.5s infinite;
 }
-.orb__bars span:nth-child(3) {
-  animation-delay: -0.3s;
+.face__cheek {
+  fill: var(--accent);
+  opacity: 0.55;
 }
-.orb__bars span:nth-child(4) {
-  animation-delay: -0.75s;
+.face__smile {
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 4;
+  stroke-linecap: round;
 }
-.orb__bars span:nth-child(5) {
-  animation-delay: -0.15s;
+.face__talk {
+  fill: currentColor;
+  opacity: 0;
 }
-@keyframes bar {
+.face__eyes {
+  transition: transform 0.3s;
+}
+/* Listening: eyes a little wider. */
+.orb--listening .face__eyes {
+  transform: scale(1.12);
+}
+/* Thinking: eyes look up, as if working something out. */
+.orb--thinking .face__eyes {
+  transform: translate(6%, -10%);
+}
+/* Speaking: the smile gives way to a mouth that moves. */
+.orb--speaking .face__smile {
+  opacity: 0;
+}
+.orb--speaking .face__talk {
+  opacity: 1;
+  animation: talk 0.42s ease-in-out infinite alternate;
+}
+@keyframes blink {
   0%,
+  94%,
   100% {
-    transform: scaleY(0.3);
+    transform: scaleY(1);
   }
-  50% {
+  97% {
+    transform: scaleY(0.1);
+  }
+}
+@keyframes talk {
+  from {
+    transform: scaleY(0.25);
+  }
+  to {
     transform: scaleY(1);
   }
 }
@@ -1242,7 +1289,7 @@ button {
   max-width: 640px;
   margin: 0 auto;
   border-top: 0;
-  background: transparent;
+  background: var(--bg);
   padding-bottom: 28px;
 }
 /* The small orb in the bottom bar is for phones only (see the media query below). */
@@ -1568,4 +1615,89 @@ button {
     transition: none !important;
     scroll-behavior: auto !important;
   }
+}
+
+/* ---------- The outfit being put together ---------- */
+.outfit {
+  display: grid;
+  gap: 14px;
+  margin-bottom: 24px;
+  padding: 18px;
+  border-radius: var(--radius-lg);
+  background: var(--surface);
+  box-shadow: 0 0 0 1px var(--line);
+}
+.outfit__head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+}
+.outfit__title {
+  margin: 0;
+  font-size: 1.15rem;
+}
+.outfit__total {
+  font-weight: 600;
+}
+.outfit__pieces {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(130px, 1fr));
+  gap: 12px;
+}
+.outfit__piece {
+  display: grid;
+  gap: 4px;
+}
+.outfit__image {
+  aspect-ratio: 1;
+  border-radius: var(--radius);
+  background: var(--surface-2);
+  border: 2px dashed var(--line);
+  overflow: hidden;
+}
+.outfit__piece.is-picked .outfit__image {
+  border: 2px solid var(--ring);
+  background: #ffffff;
+}
+.outfit__image img {
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+}
+.outfit__kind {
+  margin: 0;
+  font-weight: 600;
+  text-transform: capitalize;
+}
+.outfit__name {
+  margin: 0;
+  font-size: 0.85rem;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+.outfit__actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+
+/* ---------- Virtual try-on ---------- */
+.card__try {
+  grid-column: 1 / -1;
+}
+.try-on__start,
+.try-on__result {
+  display: grid;
+  gap: 14px;
+}
+.try-on__result img {
+  width: 100%;
+  border-radius: var(--radius);
+  background: var(--surface-2);
 }

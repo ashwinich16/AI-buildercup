@@ -35,6 +35,7 @@ from scout.agents.model_io import content_text, response_json
 from scout.catalog import CatalogRepository, SearchQuery
 from scout.config import Settings
 from scout.domain import ShoppingNeed
+from scout.domain.outfit import MAX_PIECES
 from scout.tools.retrieval import word_stems
 
 logger = logging.getLogger(__name__)
@@ -50,6 +51,7 @@ Intent = Literal[
     "choose",             # has decided on a product (Scout adds it to the cart)
     "cart",               # wants to hear, change or check out their cart
     "see_suggestion",     # wants to see other items like the one Scout suggested to go with their cart
+    "outfit",             # wants help putting an outfit together for an occasion, or is steering one in progress
     "pause",              # wants Scout to stop talking or wait, without ending the conversation
     "end_conversation",   # wants to finish the conversation for now
     "reject",             # does not like a presented product
@@ -79,6 +81,15 @@ class TurnUnderstanding(BaseModel):
     about_suggestion: bool = Field(
         default=False, description="True when the product they mean is the ITEM SCOUT SUGGESTED to go with "
                                    "their cart, not one of the presented options")
+    outfit_action: Optional[Literal["start", "skip", "add_extra", "finish", "add_to_cart"]] = Field(
+        default=None, description="For outfit: start a new one, skip the piece being chosen, accept the extra piece "
+                                  "Scout offered, finish without more pieces, or put the whole outfit in the cart")
+    leaves_outfit: bool = Field(
+        default=False, description="True when an outfit is in progress but this message is about something else, "
+                                   "not about putting that outfit together")
+    outfit_pieces: list[str] = Field(
+        default_factory=list, max_length=MAX_PIECES,
+        description="For outfit start: the catalog categories they asked to have in it; empty if they did not say")
     cart_action: Optional[Literal["view", "remove", "clear", "checkout"]] = Field(
         default=None, description="For cart: what they want to do with it; clear = take everything out")
     cart_positions: list[int] = Field(
@@ -101,6 +112,9 @@ The shopper usually speaks, and their words reach you through speech recognition
 CATALOG CATEGORIES: {categories}
 PRODUCT TYPES IN THE SHOP: {product_types}
 
+THE CONVERSATION SO FAR (the last few exchanges, oldest first)
+{recent}
+
 WHAT YOU KNOW SO FAR
 Need: {need}
 Your last question to the shopper: {last_question}
@@ -121,6 +135,9 @@ THEIR CART
 ITEM SCOUT SUGGESTED TO GO WITH THEIR CART
 {suggestion}
 
+OUTFIT YOU ARE PUTTING TOGETHER WITH THEM
+{outfit}
+
 FOR THE SHOPPER'S NEW MESSAGE
 
 1. intent: decide what the shopper is trying to achieve right now.
@@ -136,6 +153,13 @@ FOR THE SHOPPER'S NEW MESSAGE
        see_suggestion: to see other items like it.
        reject: they do not want it. Write reply: a short, easy-going acknowledgement (no pressure, and invite what is next).
    - reject: they do not like a presented product.
+   - outfit: they want help putting together an outfit or a look for an occasion or event, or they are steering the outfit in progress (above). Set outfit_action:
+       start: a new outfit. Put the occasion in need.purpose, whose style in need.gender, a budget for the whole outfit in need.budget_max, leave need.category null, and put the catalog categories they asked to have in it in outfit_pieces, in the order they asked (empty if they did not say). Do not ask about kinds or pieces: Scout's stylist plans them.
+       skip: they do not want the piece being chosen now.
+       add_extra: they accept the extra piece Scout offered to finish the look.
+       finish: they decline the extra piece, or say the outfit is complete.
+       add_to_cart: they want the whole outfit put in their cart.
+     While an outfit is in progress, picking one of the presented options is choose, and asking for cheaper or different options for the piece is shop as usual. Styling is not always what they want: when a message is about something other than this outfit, set leaves_outfit true and handle it as you normally would.
    - pause: they want Scout to stop talking, be quiet or wait for a moment, without leaving.
    - end_conversation: they want to finish talking for now or say goodbye.
    - other: anything else.
@@ -234,6 +258,8 @@ class ElicitationAgentBuilder:
             profile=state_keys.profile(state).to_prompt_text(),
             cart=state_keys.cart(state).to_prompt_text(),
             suggestion=_suggestion_text(state),
+            outfit=_outfit_text(state),
+            recent=state_keys.recent_turns_text(state),
         )
 
     # ADK calls this after the model answers; the agent keeps its own state up to date.
@@ -266,6 +292,8 @@ class ElicitationAgentBuilder:
             state[state_keys.REQUESTED_CATEGORIES] = requested   # honest: the request really is noted
 
         self._settle_suggestion(state, turn)
+        self._carry_outfit_request(state, turn)
+        self._fresh_outfit_need(state, turn)
         turn.need.product_types = self._known_types(turn.need.product_types)
         turn.need.gender = self._kept_gender(state, turn.need)
         message = content_text(callback_context.user_content, separator=" ")
@@ -274,6 +302,10 @@ class ElicitationAgentBuilder:
             logger.info("Need has no gender for %r; asking before searching.", turn.need.category)
             turn.ready_to_search = False
             turn.question = _gender_question(turn.need)
+        starting_outfit = turn.intent == "outfit" and turn.outfit_action == "start"
+        state[state_keys.OUTFIT_REQUESTED] = ({"pieces": turn.outfit_pieces}
+                                              if starting_outfit and not turn.ready_to_search else None)
+        self._forget_heard_if_need_changed(state, turn.need)
         state[state_keys.NEED] = turn.need.model_dump()
         if turn.question and not turn.ready_to_search:
             state[state_keys.QUESTIONS_ASKED] = asked + 1
@@ -295,6 +327,37 @@ class ElicitationAgentBuilder:
         if need.gender is None and previous.gender and previous.category == need.category:
             return previous.gender
         return need.gender
+
+    @staticmethod
+    def _forget_heard_if_need_changed(state, need: ShoppingNeed) -> None:
+        """Options were heard against the need as it was. Once it changes (a quality is no longer avoided, a new
+        price limit...), the ones that fit the new need count as new again, so "more" or "others" can show them."""
+        wording = {"looking_for"}   # every other field changes which products fit
+        if need.model_dump(exclude=wording) != state_keys.need(state).model_dump(exclude=wording):
+            state[state_keys.SEEN] = []
+
+    @staticmethod
+    def _carry_outfit_request(state, turn: TurnUnderstanding) -> None:
+        """An outfit needs only one thing first: whose style it is (asked by _must_ask_gender). The Stylist plans
+        the pieces, so no other question is asked. The answer ("women's") reads like ordinary shopping, so a
+        request waiting on that question carries on into the reply, unless the shopper moved on."""
+        requested = state.get(state_keys.OUTFIT_REQUESTED)
+        if requested and turn.intent in ("shop", "other") and not turn.leaves_outfit:
+            turn.intent, turn.outfit_action = "outfit", "start"
+            turn.outfit_pieces = turn.outfit_pieces or requested.get("pieces", [])
+        if turn.intent == "outfit" and turn.outfit_action == "start":
+            turn.ready_to_search, turn.question = True, None
+
+    @staticmethod
+    def _fresh_outfit_need(state, turn: TurnUnderstanding) -> None:
+        """A new outfit starts from the occasion. While an outfit was in progress the need held the piece being
+        searched (its kind and the budget left), which must not carry over."""
+        if turn.intent != "outfit" or turn.outfit_action != "start":
+            return
+        turn.need.category, turn.need.product_types = None, []
+        previous = state_keys.outfit(state)
+        if previous is not None and turn.need.budget_max == state_keys.need(state).budget_max:
+            turn.need.budget_max = None          # the old outfit's leftover, not a budget they gave now
 
     @staticmethod
     def _settle_suggestion(state, turn: TurnUnderstanding) -> None:
@@ -331,6 +394,8 @@ class ElicitationAgentBuilder:
         The prompt asks for this, but the model sometimes skips it; a mixed list is the worst outcome.
         """
         need = turn.need
+        if turn.intent == "outfit" and turn.outfit_action == "start" and turn.ready_to_search:
+            return need.gender is None and asked < self._settings.elicitation_safety_max_questions   # never mixed
         if turn.intent not in ("shop", "reject") or not turn.ready_to_search or need.gender or not need.category:
             return False
         if asked >= self._settings.elicitation_safety_max_questions:
@@ -387,9 +452,26 @@ def _suggestion_text(state) -> str:
             f"goes with their {suggestion.goes_with}).{offered}")
 
 
+def _outfit_text(state) -> str:
+    outfit = state_keys.outfit(state)
+    if outfit is None and state.get(state_keys.OUTFIT_REQUESTED):
+        return ("Not started yet: the shopper asked for an outfit and Scout asked whose style it is. "
+                "Their reply continues that request (intent outfit, start) unless they clearly want something else.")
+    if outfit is None:
+        return "none"
+    index = outfit.current()
+    if index is not None:
+        now = f"Scout is showing options for the {outfit.plan.pieces[index].category}."
+    elif outfit.offered_extra:
+        now = f"Scout offered to find a {outfit.offered_extra.category} to finish the look."
+    else:
+        now = "Scout offered to put the whole outfit in their cart."
+    return f"{outfit.to_prompt_text()}\n{now}"
+
+
 def _gender_question(need: ShoppingNeed) -> str:
     """Asked only when the model skipped this question; it names the category as the catalog spells it."""
-    kind = " or ".join(need.product_types) or need.category or "this"
+    kind = " or ".join(need.product_types) or need.category or "outfit"
     return f"Happy to help! Is this for a men's or a women's style of {kind}?"
 
 

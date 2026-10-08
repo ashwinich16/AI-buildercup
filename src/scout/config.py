@@ -49,6 +49,7 @@ AGENT_TUNING_DEFAULTS = {
     "comparison": AgentTuning(temperature=0.2, thinking_budget=2048),       # deepest reasoning, consistent
     "preference": AgentTuning(temperature=0.2, thinking_budget=1024),       # runs after the reply: no rush
     "recommender": AgentTuning(temperature=0.2, thinking_budget=0),         # which kinds go together (cached)
+    "stylist": AgentTuning(temperature=0.6, thinking_budget=512),           # plans an outfit for an occasion
 }
 
 
@@ -71,6 +72,9 @@ class Settings:
 
     # Elicitation
     elicitation_safety_max_questions: int   # guard against loops, not a target
+
+    # Virtual try-on (Vertex AI)
+    try_on_model: str
 
     # Web app
     auth_mode: str              # "demo" (persona picker) or "firebase" (Sign in with Google)
@@ -119,6 +123,7 @@ class Settings:
             agent_tuning={name: _tuning_from_env(name, default)
                           for name, default in AGENT_TUNING_DEFAULTS.items()},
             elicitation_safety_max_questions=int(_optional("SCOUT_ELICITATION_SAFETY_MAX_QUESTIONS", "6")),
+            try_on_model=_optional("SCOUT_TRY_ON_MODEL", "virtual-try-on-001"),
             auth_mode=_optional("SCOUT_AUTH_MODE", "demo").lower(),
             firebase_api_key=_optional("SCOUT_FIREBASE_API_KEY"),
             firebase_auth_domain=_optional("SCOUT_FIREBASE_AUTH_DOMAIN", f"{project_id}.firebaseapp.com"),

@@ -6,6 +6,7 @@ Scout web API (FastAPI). Serves the React app and these endpoints:
   POST /api/chat/stream     send a message; Scout's reply streams back as it is written, then what
                             to show (newline-delimited JSON)
   POST /api/speech          Scout's reply as natural speech (MP3)
+  POST /api/try-on          the shopper's photo wearing the chosen products (PNG); the photo is never stored
 
 The shopper (id and name) always comes from the Authenticator, never from the
 request body, so one shopper can never read or change another shopper's
@@ -16,6 +17,8 @@ Run locally (from the repository root):
 """
 
 import asyncio
+import base64
+import binascii
 import json
 import logging
 from contextlib import asynccontextmanager
@@ -35,6 +38,8 @@ from scout.api.warmup import keep_warm
 from scout.app import build_catalog, build_root_agent
 from scout.catalog import SearchQuery
 from scout.config import Settings, get_settings
+from scout.tools import ImageFetcher
+from scout.tools.try_on import TryOnError, TryOnStudio
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -56,6 +61,16 @@ class SpeechRequest(BaseModel):
     rate: float = 1.0
 
 
+class TryOnRequest(BaseModel):
+    session_id: str
+    product_ids: list[str] = Field(min_length=1, max_length=4)   # one product, or the pieces of an outfit
+    photo: str                                                   # the shopper's photo, base64
+    mime_type: str = Field(default="image/jpeg", pattern=r"^image/(jpeg|png)$")   # what the model accepts
+
+
+MAX_PHOTO_BYTES = 10 * 1024 * 1024   # Vertex AI Virtual Try-On's input limit
+
+
 def build_authenticator(settings: Settings) -> Authenticator:
     if settings.auth_mode == "firebase":
         return FirebaseAuthenticator(settings.project_id, settings.firebase_api_key, settings.firebase_auth_domain)
@@ -69,6 +84,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     chat = ScoutChatService(root, build_shopper_repository(settings))
     auth = build_authenticator(settings)
     speech = SpeechSynthesizer(settings.tts_voice)
+    studio = TryOnStudio(settings, ImageFetcher())
     personas = load_personas()
 
     # Warm every cloud connection at start-up and keep it warm, so no shopper waits for a cold start.
@@ -126,6 +142,25 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     async def speak(body: SpeechRequest, _: Shopper = Depends(current_shopper)) -> Response:
         audio = await asyncio.to_thread(speech.synthesize, body.text, body.rate)
         return Response(content=audio, media_type="audio/mpeg")
+
+    @app.post("/api/try-on")
+    async def try_on(body: TryOnRequest, shopper: Shopper = Depends(current_shopper)) -> Response:
+        try:
+            products = await chat.products(shopper.id, body.session_id, body.product_ids)
+            photo = base64.b64decode(body.photo, validate=True)
+        except LookupError:
+            raise HTTPException(status_code=404, detail="Conversation not found. Please start again.")
+        except binascii.Error:
+            raise HTTPException(status_code=400, detail="That photo couldn't be read.")
+        if not products:
+            raise HTTPException(status_code=404, detail="I can't find those items in our conversation.")
+        if len(photo) > MAX_PHOTO_BYTES:
+            raise HTTPException(status_code=413, detail="That photo is too large. Please use one under 10 MB.")
+        try:
+            image = await asyncio.to_thread(studio.dress, photo, body.mime_type, products)
+        except TryOnError as error:
+            raise HTTPException(status_code=422, detail=str(error))
+        return Response(content=image, media_type="image/png")
 
     if FRONTEND_DIST.exists():               # the built React app, served from the same Cloud Run service
         app.mount("/", StaticFiles(directory=FRONTEND_DIST, html=True), name="frontend")

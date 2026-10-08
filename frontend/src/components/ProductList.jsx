@@ -11,7 +11,7 @@ const QUICK_ACTIONS = [
   "Describe the first one",
 ];
 
-export default function ProductList({ products, focusId, spokenPosition, busy, onAsk }) {
+export default function ProductList({ products, focusId, spokenPosition, busy, onAsk, onTryOn }) {
   // Keep the option Scout is talking about in view: the one being described right now, else the focus.
   const spokenId = products.find((p) => p.position === spokenPosition)?.id;
   const inView = spokenId || focusId;
@@ -42,6 +42,7 @@ export default function ProductList({ products, focusId, spokenPosition, busy, o
               speaking={product.id === spokenId}
               busy={busy}
               onAsk={onAsk}
+              onTryOn={onTryOn}
             />
           </li>
         ))}
@@ -65,7 +66,7 @@ export default function ProductList({ products, focusId, spokenPosition, busy, o
   );
 }
 
-function ProductCard({ product, focused, speaking, busy, onAsk }) {
+function ProductCard({ product, focused, speaking, busy, onAsk, onTryOn }) {
   const position = ORDINALS[product.position - 1] || `Option ${product.position}`;
   const describe = () => onAsk(`Describe option ${product.position} in detail`);
   // The strongest quote, plus a heads-up if reviewers flag one: enough to judge at a glance and keep
@@ -151,6 +152,12 @@ function ProductCard({ product, focused, speaking, busy, onAsk }) {
           </button>
           <button className="button" disabled={busy} onClick={() => onAsk(`Add option ${product.position} to my cart`)}>
             Add to cart
+          </button>
+          <button
+            className="button button--ghost card__try"
+            onClick={() => onTryOn({ productIds: [product.id], label: product.name })}
+          >
+            Try it on
           </button>
         </div>
       </div>

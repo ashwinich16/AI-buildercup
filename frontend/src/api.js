@@ -68,6 +68,14 @@ export const api = {
     if (!done) throw new Error("The reply was cut off.");
     return done;
   },
+  // The shopper's photo ({ data: base64, mimeType }) wearing the products: resolves with a PNG blob.
+  tryOn: async (sessionId, productIds, photo) =>
+    (
+      await request("/api/try-on", {
+        method: "POST",
+        body: { session_id: sessionId, product_ids: productIds, photo: photo.data, mime_type: photo.mimeType },
+      })
+    ).blob(),
   speech: async (text, rate) =>
     (await request("/api/speech", { method: "POST", body: { text, rate } })).blob(),
 };

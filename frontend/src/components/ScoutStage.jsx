@@ -1,6 +1,5 @@
 import { useEffect, useRef, useState } from "react";
 import Conversation from "./Conversation.jsx";
-import Icon from "./Icons.jsx";
 
 // What Scout is doing right now. Drives the orb's look and the status line.
 export function scoutState({ ready, voiceInput, busy, speaking, paused }) {
@@ -12,6 +11,23 @@ export function scoutState({ ready, voiceInput, busy, speaking, paused }) {
   if (paused) return { name: "listening", status: "Paused. I'm still listening" };
   if (!voiceInput.hearing) return { name: "idle", status: "Starting the microphone…" };
   return { name: "listening", status: "Listening…" };
+}
+
+// Scout's face: an original little character. The orb's state (idle, listening, thinking, speaking) sets how
+// it looks, all in CSS: it blinks, looks up while thinking, and its mouth moves while it speaks.
+function ScoutFace() {
+  return (
+    <svg className="face" viewBox="0 0 100 100" focusable="false">
+      <g className="face__eyes">
+        <ellipse className="face__eye" cx="36" cy="44" rx="7" ry="9" />
+        <ellipse className="face__eye" cx="64" cy="44" rx="7" ry="9" />
+      </g>
+      <ellipse className="face__cheek" cx="25" cy="60" rx="6" ry="3.5" />
+      <ellipse className="face__cheek" cx="75" cy="60" rx="6" ry="3.5" />
+      <path className="face__smile" d="M39 63 Q50 73 61 63" />
+      <ellipse className="face__talk" cx="50" cy="66" rx="8" ry="6" />
+    </svg>
+  );
 }
 
 // The orb is Scout: press it to talk or pause. Its look shows what Scout is doing.
@@ -27,17 +43,7 @@ export function Orb({ state, active, ready, supported, onToggle, small = false }
       <span className="orb__ring" aria-hidden="true" />
       <span className="orb__ring orb__ring--late" aria-hidden="true" />
       <span className="orb__core" aria-hidden="true">
-        {state === "speaking" ? (
-          <span className="orb__bars">
-            <span />
-            <span />
-            <span />
-            <span />
-            <span />
-          </span>
-        ) : (
-          <Icon name="mic" />
-        )}
+        <ScoutFace />
       </span>
     </button>
   );

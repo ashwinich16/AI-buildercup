@@ -5,8 +5,9 @@ A voice-first shopping companion for blind and low-vision shoppers, built on Goo
 
 Scout talks with the shopper like a friend: it asks a few questions to understand the need, searches the
 catalog, describes options vividly, answers questions about a product (including what its photos show),
-compares products, keeps a cart, suggests one item that goes with what the shopper chose, and remembers
-lasting preferences. The conversation is hands-free:
+compares products, keeps a cart, suggests one item that goes with what the shopper chose, styles an outfit
+for an occasion one piece at a time, shows products on the shopper's own photo (Vertex AI Virtual
+Try-On), and remembers lasting preferences. The conversation is hands-free:
 the browser listens, Google Cloud Text-to-Speech speaks, and short chimes signal whose turn it is.
 
 ## Repository layout
@@ -15,10 +16,10 @@ the browser listens, Google Cloud Text-to-Speech speaks, and short chimes signal
 conversationalAgent/
 ├── src/scout/
 │   ├── config.py, app.py        settings and the composition root (wires every agent)
-│   ├── domain/                  Product, ShoppingNeed, PreferenceProfile
+│   ├── domain/                  Product, ShoppingNeed, PreferenceProfile, Outfit
 │   ├── catalog/                 CatalogRepository + Vertex AI Search implementation
-│   ├── tools/                   retrieval, catalog overview, cart, images, review evidence, recommendations
-│   ├── agents/                  orchestrator, elicitation, narration, product_expert, comparison, preference
+│   ├── tools/                   retrieval, catalog overview, cart, images, review evidence, recommendations, try-on
+│   ├── agents/                  orchestrator, elicitation, narration, product_expert, comparison, preference, stylist
 │   │                            (+ state_keys.py: shared session state; model_io.py: model input/output)
 │   └── api/                     FastAPI web API: auth, chat sessions, speech, demo personas
 ├── frontend/                    React app (Vite): accessible voice-first UI
@@ -179,7 +180,8 @@ run `DELETE FROM product_intelligence;` first.
 |---|---|
 | `GOOGLE_CLOUD_PROJECT`, `GOOGLE_CLOUD_LOCATION`, `GOOGLE_GENAI_USE_VERTEXAI` | Gemini on Vertex AI |
 | `SCOUT_AGENT_MODEL` | default model for every agent |
-| `SCOUT_<AGENT>_MODEL / _TEMPERATURE / _THINKING_BUDGET` | per-agent tuning (elicitation, narration, product_expert, comparison, preference, recommender) |
+| `SCOUT_TRY_ON_MODEL` | Vertex AI Virtual Try-On model (default `virtual-try-on-001`), called in `GOOGLE_CLOUD_LOCATION` |
+| `SCOUT_<AGENT>_MODEL / _TEMPERATURE / _THINKING_BUDGET` | per-agent tuning (elicitation, narration, product_expert, comparison, preference, recommender, stylist) |
 | `SCOUT_SEARCH_LOCATION`, `SCOUT_SEARCH_ENGINE_ID` or `SCOUT_SEARCH_DATA_STORE_ID` | Vertex AI Search (the data store id is also needed to look up saved cart items for the checkout suggestion) |
 | `SCOUT_AUTH_MODE` | `demo` (persona picker) or `firebase` (real sign-in) |
 | `SCOUT_TTS_VOICE` | Cloud Text-to-Speech voice |

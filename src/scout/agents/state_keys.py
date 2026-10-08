@@ -8,7 +8,7 @@ user-scoped: they belong to the shopper and are shared across their sessions.
 
 from typing import Optional
 
-from scout.domain import PreferenceProfile, Product, ShoppingNeed
+from scout.domain import Outfit, PreferenceProfile, Product, ShoppingNeed
 from scout.tools.cart import Cart
 from scout.tools.recommendations import Suggestion
 
@@ -30,6 +30,7 @@ FOCUS_PRODUCT = "focus_product"      # id of the product currently being discuss
 COMPARE_IDS = "compare_ids"          # ids of the products being compared
 COMPARISON = "comparison"            # latest ComparisonResult from the Comparison agent
 NARRATION_TASK = "narration_task"    # what the Narration agent should speak next
+RECENT_TURNS = "recent_turns"        # the last few exchanges, word for word: [{"shopper": ..., "scout": ...}]
 
 # Cart and preferences
 CART_EVENT = "cart_event"            # what just happened to the cart, for Narration to speak
@@ -39,6 +40,11 @@ SUGGESTED_KINDS = "suggested_kinds"  # kinds already suggested: never offer the 
 OFFER_OPEN = "offer_open"            # Scout offered the suggestion in its LAST reply, so a plain "yes" answers it
 OFFER_AT_CHECKOUT = "offer_at_checkout"  # that offer came at checkout: declining it means "check me out"
 CHECKOUT_REMINDED = "checkout_reminded"  # the one reminder before checkout was already given
+
+# Styling an outfit for an occasion
+STYLIST_PLAN = "stylist_plan"        # the Stylist agent's latest OutfitPlan
+OUTFIT = "outfit"                    # the Outfit being put together (plan + pieces picked), or None
+OUTFIT_REQUESTED = "outfit_requested"  # asked for, waiting on one question (whose style): {"pieces": [...]}
 PREFERENCE_EVIDENCE = "preference_evidence"  # what the Preference agent should learn from this turn
 
 # What Scout remembers about the shopper. Loaded from the ShopperRepository (Cloud SQL)
@@ -92,3 +98,17 @@ def suggestion(state) -> Optional[Suggestion]:
     """The item Scout suggested to go with the cart, if one is open."""
     raw = state.get(SUGGESTION)
     return Suggestion.model_validate(raw) if raw else None
+
+
+def outfit(state) -> Optional[Outfit]:
+    """The outfit being put together, if any."""
+    raw = state.get(OUTFIT)
+    return Outfit.model_validate(raw) if raw else None
+
+
+def recent_turns_text(state) -> str:
+    """The last few exchanges, oldest first, for an agent that needs the flow of the conversation."""
+    lines = []
+    for turn in state.get(RECENT_TURNS) or []:
+        lines += [f"Shopper: {turn.get('shopper', '')}", f"Scout: {turn.get('scout', '')}"]
+    return "\n".join(lines) or "This is the start of the conversation."

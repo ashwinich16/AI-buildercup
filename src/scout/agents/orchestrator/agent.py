@@ -15,6 +15,8 @@ Each turn:
        choose                -> add to cart, suggest one item that goes with it, Narration confirms
        cart                  -> view / remove / checkout (with one last "you might have forgotten"), Narration
        see suggestion        -> present the suggested item with a few like it
+       outfit                -> Stylist plans the pieces for the occasion; options for one piece at a time,
+                                each matched to what was already picked; extras offered once; add it all
        pause                 -> say nothing; the UI goes quiet and keeps listening
        end_conversation      -> a short goodbye; the UI stops listening
   3. AFTER the reply: the Preference agent learns lasting taste when there is
@@ -29,6 +31,7 @@ creates them.
 
 import asyncio
 import logging
+import re
 from typing import AsyncGenerator, Optional
 
 from google.adk.agents import BaseAgent
@@ -41,13 +44,16 @@ from scout.agents import state_keys
 from scout.agents.elicitation import TurnUnderstanding, read_turn
 from scout.agents.model_io import content_text
 from scout.agents.narration import NarrationTask
-from scout.domain import Product, ShoppingNeed
+from scout.domain import Outfit, OutfitPlan, Product, ShoppingNeed
 from scout.tools import CatalogOverviewBuilder, ProductReferenceResolver, ProductRetriever
 from scout.tools.recommendations import Recommender, Suggestion, SuggestionRules
 
 logger = logging.getLogger(__name__)
 
 PRODUCTS_TO_PRESENT = 3   # listeners can keep about three options in mind
+SCREEN_CUES = re.compile(r"\[\[\d+\]\]")   # [[2]] tags that light up an option on screen; not words
+RECENT_TURNS_KEPT = 6       # exchanges Elicitation sees word for word (the need, cart and profile hold the rest)
+SCOUT_WORDS_KEPT = 400      # characters of each reply: enough to know what was said, small enough to stay fast
 NOTHING_SHOWN_YET = "I haven't shown you anything yet. Tell me what you're looking for and I'll find a few options."
 
 
@@ -60,13 +66,14 @@ class ScoutOrchestrator(BaseAgent):
     product_expert: BaseAgent
     comparison: BaseAgent
     preference: BaseAgent
+    stylist: BaseAgent
     retriever: ProductRetriever
     overview_builder: CatalogOverviewBuilder
     resolver: ProductReferenceResolver
     recommender: Recommender
 
     def __init__(self, elicitation: BaseAgent, narration: BaseAgent, product_expert: BaseAgent,
-                 comparison: BaseAgent, preference: BaseAgent, retriever: ProductRetriever,
+                 comparison: BaseAgent, preference: BaseAgent, stylist: BaseAgent, retriever: ProductRetriever,
                  overview_builder: CatalogOverviewBuilder, resolver: ProductReferenceResolver,
                  recommender: Recommender, name: str = "scout"):
         super().__init__(
@@ -77,11 +84,12 @@ class ScoutOrchestrator(BaseAgent):
             product_expert=product_expert,
             comparison=comparison,
             preference=preference,
+            stylist=stylist,
             retriever=retriever,
             overview_builder=overview_builder,
             resolver=resolver,
             recommender=recommender,
-            sub_agents=[elicitation, narration, product_expert, comparison, preference],
+            sub_agents=[elicitation, narration, product_expert, comparison, preference, stylist],
         )
 
     async def _run_async_impl(self, ctx: InvocationContext) -> AsyncGenerator[Event, None]:
@@ -98,17 +106,23 @@ class ScoutOrchestrator(BaseAgent):
         turn = read_turn(ctx.session.state)
         if ctx.session.state.get(state_keys.OFFER_OPEN):   # the offer was answered (or passed over) just now
             yield self._update_state(ctx, {state_keys.OFFER_OPEN: False})
+        if turn is not None and turn.leaves_outfit and ctx.session.state.get(state_keys.OUTFIT):
+            yield self._update_state(ctx, {state_keys.OUTFIT: None})   # they moved on: back to normal shopping
         if turn is None:
             yield self._say(ctx, "Sorry, I didn't quite catch that. Could you say it another way?")
             return
 
         # 2. Reply.
         evidence: Optional[str] = None      # what the Preference agent should learn from, if anything
+        spoken: list[str] = []
         async for event in self._route(ctx, turn):
             if isinstance(event, str):      # a route may hand back evidence for learning
                 evidence = event
             else:
+                if event.content and not event.partial:
+                    spoken.append(content_text(event.content))
                 yield event
+        yield self._update_state(ctx, {state_keys.RECENT_TURNS: self._recent_turns(ctx, " ".join(spoken))})
 
         # 3. Learn, after the shopper already has their answer.
         if evidence or turn.lasting_preference:
@@ -148,6 +162,8 @@ class ScoutOrchestrator(BaseAgent):
             steps = self._cart(ctx, turn)
         elif turn.intent == "see_suggestion":
             steps = self._show_suggestion(ctx)
+        elif turn.intent == "outfit":
+            steps = self._outfit(ctx, turn)
         elif turn.intent == "pause":
             steps = self._nothing()
         elif turn.intent == "end_conversation":
@@ -161,7 +177,8 @@ class ScoutOrchestrator(BaseAgent):
     # Steps
     # -----------------------------------------------------------------
 
-    async def _search_and_narrate(self, ctx: InvocationContext, skip_seen: bool = False):
+    async def _search_and_narrate(self, ctx: InvocationContext, skip_seen: bool = False,
+                                  task: NarrationTask = NarrationTask.PRESENT_OPTIONS):
         state = ctx.session.state
         need = state_keys.need(state)
         seen = set(state.get(state_keys.SEEN) or []) if skip_seen else set()
@@ -187,7 +204,7 @@ class ScoutOrchestrator(BaseAgent):
             state_keys.OTHER_TYPES: result.other_types,
             state_keys.PRESENTED: first,
             state_keys.SEEN: sorted(seen) + first,
-            state_keys.NARRATION_TASK: NarrationTask.PRESENT_OPTIONS.value,
+            state_keys.NARRATION_TASK: task.value,
             state_keys.FOCUS_PRODUCT: None,
         })
         async for event in self.narration.run_async(ctx):
@@ -277,6 +294,13 @@ class ScoutOrchestrator(BaseAgent):
             yield self._say(ctx, "Lovely! Which one would you like: the first, second or third?")
             return
 
+        outfit = state_keys.outfit(ctx.session.state)
+        if suggested is None and outfit is not None and outfit.pick(product):   # a piece of the outfit
+            yield self._evidence("chose", product, turn.reason)
+            async for item in self._outfit_step(ctx, outfit):
+                yield item
+            return
+
         cart = state_keys.cart(ctx.session.state)
         added = cart.add(product)
         delta = {
@@ -333,6 +357,76 @@ class ScoutOrchestrator(BaseAgent):
         yield self._update_state(ctx, delta)
         async for item in self._narrate_offer(ctx, reminder):
             yield item
+
+    async def _outfit(self, ctx: InvocationContext, turn: TurnUnderstanding):
+        """Styling an outfit: start one, or steer the one in progress."""
+        outfit = state_keys.outfit(ctx.session.state)
+        action = turn.outfit_action
+        if action == "start":
+            yield self._update_state(ctx, {state_keys.STYLIST_PLAN: None})   # never reuse an older plan
+            async for event in self._silently(self.stylist, ctx):
+                yield event
+            raw = ctx.session.state.get(state_keys.STYLIST_PLAN)
+            plan = OutfitPlan.model_validate(raw) if raw else None
+            if plan is None or not plan.pieces:
+                yield self._say(ctx, "I couldn't put an outfit together for that from what the shop has. "
+                                     "Could you tell me a bit more about the occasion?")
+                return
+            outfit = Outfit.start(plan, state_keys.need(ctx.session.state).budget_max)
+        elif outfit is None:
+            yield self._say(ctx, "We don't have an outfit going right now. Tell me the occasion and I'll help "
+                                 "you put one together.")
+            return
+        elif action == "add_to_cart":
+            async for item in self._add_outfit_to_cart(ctx, outfit):
+                yield item
+            return
+        elif action == "skip" and outfit.current() is not None:
+            outfit.skip_current()
+        elif action == "add_extra":
+            outfit.accept_extra()
+        elif action in ("skip", "finish"):   # "no" to the extra on offer
+            outfit.decline_extra()
+        async for item in self._outfit_step(ctx, outfit):
+            yield item
+
+    async def _outfit_step(self, ctx: InvocationContext, outfit: Outfit):
+        """Options for the next piece to choose; once every piece is picked, the whole outfit and one offer."""
+        need = outfit.need_for_current(state_keys.need(ctx.session.state))
+        if need is None and not outfit.chosen():   # every piece skipped
+            yield self._update_state(ctx, {state_keys.OUTFIT: None})
+            yield self._say(ctx, "No problem, we've skipped every piece. Shall we try a different kind of outfit?")
+            return
+        if need is None:
+            outfit.offer_extra()
+            yield self._update_state(ctx, {state_keys.OUTFIT: outfit.model_dump(),
+                                           state_keys.NARRATION_TASK: NarrationTask.OUTFIT_DONE.value})
+            async for event in self.narration.run_async(ctx):
+                yield event
+            return
+        yield self._update_state(ctx, {state_keys.OUTFIT: outfit.model_dump(), state_keys.NEED: need.model_dump(),
+                                       state_keys.SUGGESTION: None})
+        async for event in self._search_and_narrate(ctx, task=NarrationTask.OUTFIT_STEP):
+            yield event
+        if not outfit.introduced:            # the plan is shared once, with the first piece
+            outfit.introduced = True
+            yield self._update_state(ctx, {state_keys.OUTFIT: outfit.model_dump()})
+
+    async def _add_outfit_to_cart(self, ctx: InvocationContext, outfit: Outfit):
+        chosen = outfit.chosen()
+        if not chosen:
+            yield self._say(ctx, "We haven't picked any pieces yet. Shall we start with the first one?")
+            return
+        cart = state_keys.cart(ctx.session.state)
+        added = [product.title for product in chosen if cart.add(product)]
+        yield self._update_state(ctx, {
+            state_keys.CART: cart.model_dump(),
+            state_keys.CART_EVENT: {"action": "added" if added else "already_in_cart", "items": added},
+            state_keys.NARRATION_TASK: NarrationTask.CART_UPDATE.value,
+            state_keys.OUTFIT: None,             # done: it is in the cart now
+        })
+        async for event in self.narration.run_async(ctx):
+            yield event
 
     async def _decline_suggestion(self, ctx: InvocationContext, turn: TurnUnderstanding, product: Product):
         """No thanks: no new search, no pressure. Declining the reminder at checkout means "check me out"."""
@@ -394,6 +488,14 @@ class ScoutOrchestrator(BaseAgent):
         if suggestion is not None:
             kind = suggestion.product.kind.lower()
             yield self._update_state(ctx, {state_keys.OFFER_OPEN: bool(kind) and kind in " ".join(spoken)})
+
+    @staticmethod
+    def _recent_turns(ctx: InvocationContext, reply: str) -> list[dict]:
+        """The conversation so far, word for word but only the last few exchanges."""
+        turns = list(ctx.session.state.get(state_keys.RECENT_TURNS) or [])
+        turns.append({"shopper": content_text(ctx.user_content, separator=" "),
+                      "scout": " ".join(SCREEN_CUES.sub(" ", reply).split())[:SCOUT_WORDS_KEPT]})
+        return turns[-RECENT_TURNS_KEPT:]
 
     @staticmethod
     def _suggestion_rules(ctx: InvocationContext) -> SuggestionRules:

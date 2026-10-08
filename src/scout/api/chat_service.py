@@ -59,8 +59,9 @@ class CartView(BaseModel):
     total: float = 0.0
 
 
-class SuggestionCard(BaseModel):
-    """One item that goes with the cart ("goes well with your trousers")."""
+class SmallProductCard(BaseModel):
+    """A product shown small: the suggested item, or a picked piece of an outfit."""
+    id: str
     name: str
     price: Optional[float] = None
     image_url: Optional[str] = None
@@ -69,11 +70,25 @@ class SuggestionCard(BaseModel):
     reasons: list[str] = Field(default_factory=list)
 
 
+class OutfitPieceView(BaseModel):
+    kind: str                            # the catalog category, e.g. "trousers"
+    looks_like: str = ""
+    picked: Optional[SmallProductCard] = None   # the product chosen for it, once picked
+
+
+class OutfitView(BaseModel):
+    """The outfit being put together: every piece, picked or still to choose."""
+    occasion: str
+    pieces: list[OutfitPieceView] = Field(default_factory=list)
+    total: float = 0.0
+
+
 class ScreenState(BaseModel):
     products: list[ProductCard] = Field(default_factory=list)
     focus_product_id: Optional[str] = None
     cart: CartView = Field(default_factory=CartView)
-    suggestion: Optional[SuggestionCard] = None
+    suggestion: Optional[SmallProductCard] = None
+    outfit: Optional[OutfitView] = None
 
 
 class ChatTurn(ScreenState):
@@ -169,6 +184,18 @@ class ScoutChatService:
         """Raises LookupError if this shopper has no such conversation."""
         await self._get(user_id, session_id)
 
+    async def products(self, user_id: str, session_id: str, product_ids: list[str]) -> list[Product]:
+        """Products this conversation has shown (options, the suggestion, outfit pieces), in the order asked.
+        Raises LookupError if this shopper has no such conversation."""
+        state = (await self._get(user_id, session_id)).state
+        known = dict(state_keys.shortlist(state))
+        suggestion, outfit = state_keys.suggestion(state), state_keys.outfit(state)
+        if suggestion:
+            known[suggestion.product.id] = suggestion.product
+        if outfit:
+            known.update({product.id: product for product in outfit.chosen()})
+        return [known[i] for i in product_ids if i in known]
+
     async def _get(self, user_id: str, session_id: str):
         session = await self._sessions.get_session(app_name=APP_NAME, user_id=user_id, session_id=session_id)
         if session is None:
@@ -250,22 +277,30 @@ def _screen_from_state(state: dict) -> ScreenState:
     cart = state_keys.cart(state)
     return ScreenState(products=cards, focus_product_id=state.get(state_keys.FOCUS_PRODUCT),
                        cart=CartView(items=cart.items, total=cart.total),
-                       suggestion=_suggestion_card(state))
+                       suggestion=_suggestion_card(state), outfit=_outfit_view(state))
 
 
-def _suggestion_card(state: dict) -> Optional[SuggestionCard]:
+def _suggestion_card(state: dict) -> Optional[SmallProductCard]:
     suggestion = state_keys.suggestion(state)
     if suggestion is None:
         return None
-    product = suggestion.product
-    return SuggestionCard(
-        name=_card_name(product),
-        price=product.price,
-        image_url=product.image_urls[0] if product.image_urls else None,
-        goes_with=suggestion.goes_with,
-        kind=product.kind or "item",
-        reasons=suggestion.reasons,
-    )
+    return _small_card(suggestion.product).model_copy(update={"goes_with": suggestion.goes_with,
+                                                             "reasons": suggestion.reasons})
+
+
+def _outfit_view(state: dict) -> Optional[OutfitView]:
+    outfit = state_keys.outfit(state)
+    if outfit is None:
+        return None
+    pieces = [OutfitPieceView(kind=piece.category, looks_like=piece.looks_like,
+                              picked=_small_card(product) if product else None)
+              for piece, product in zip(outfit.plan.pieces, outfit.picked)]
+    return OutfitView(occasion=outfit.plan.occasion, pieces=pieces, total=outfit.total())
+
+
+def _small_card(product: Product) -> SmallProductCard:
+    return SmallProductCard(id=product.id, name=_card_name(product), price=product.price,
+                          image_url=product.image_urls[0] if product.image_urls else None, kind=product.kind or "item")
 
 
 def _card_name(product: Product) -> str:

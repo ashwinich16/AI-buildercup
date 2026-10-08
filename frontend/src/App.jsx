@@ -8,12 +8,16 @@ import ScoutStage from "./components/ScoutStage.jsx";
 import Composer from "./components/Composer.jsx";
 import ProductList from "./components/ProductList.jsx";
 import PairsWith from "./components/PairsWith.jsx";
+import OutfitStrip from "./components/OutfitStrip.jsx";
+import TryOnSheet from "./components/TryOnSheet.jsx";
 import CartSheet from "./components/CartSheet.jsx";
 import SettingsSheet from "./components/SettingsSheet.jsx";
 
-const EMPTY_SCREEN = { products: [], cart: { items: [], total: 0 }, focus_product_id: null, suggestion: null };
+const EMPTY_SCREEN = { products: [], cart: { items: [], total: 0 }, focus_product_id: null, suggestion: null, outfit: null };
 // What to show, from any API response that carries it (session start, streamed screen, end of turn).
-const screenOf = ({ products, cart, focus_product_id, suggestion }) => ({ products, cart, focus_product_id, suggestion });
+const screenOf = ({ products, cart, focus_product_id, suggestion, outfit }) => ({
+  products, cart, focus_product_id, suggestion, outfit,
+});
 const DEFAULT_SETTINGS = {
   voice: true, rate: 1, language: "en-IN", highContrast: false, largeText: false, headphones: false,
 };
@@ -46,7 +50,9 @@ export default function App() {
   const [openSheet, setOpenSheet] = useState(null); // "cart", "settings" or null
   const [spokenOption, setSpokenOption] = useState(null); // position of the option Scout is describing right now
   const [assistantWidth, setAssistantWidth] = useState(DEFAULT_ASSISTANT_WIDTH); // the Scout panel, in pixels
-  const [categories, setCategories] = useState([]); // what the shop sells, offered as first things to ask for
+  const [categories, setCategories] = useState([]);
+  const [tryOn, setTryOn] = useState(null); // what to try on: { productIds, label }, or null
+  const [photo, setPhoto] = useState(null); // the shopper's photo for try-on, kept only while the page is open // what the shop sells, offered as first things to ask for
 
   const speaker = useSpeaker();
   const { speak, startStream, stop: stopSpeaking, isEcho, audibleAt } = speaker;
@@ -253,7 +259,7 @@ export default function App() {
 
   if (!shopper) return <SignIn onSignedIn={startShopping} />;
 
-  const hasProducts = screen.products.length > 0;
+  const hasProducts = screen.products.length > 0 || Boolean(screen.outfit);   // something to show beside Scout
 
   return (
     <div className="app">
@@ -280,12 +286,14 @@ export default function App() {
       >
         {hasProducts && (
           <section className="layout__shop" aria-label="Options">
+            <OutfitStrip outfit={screen.outfit} busy={busy} onAsk={send} onTryOn={setTryOn} />
             <ProductList
               products={screen.products}
               focusId={screen.focus_product_id}
               spokenPosition={spokenOption}
               busy={busy || !sessionId}
               onAsk={send}
+              onTryOn={setTryOn}
             />
             <PairsWith suggestion={screen.suggestion} busy={busy} onAsk={send} />
           </section>
@@ -328,6 +336,13 @@ export default function App() {
         suggestion={screen.suggestion}
         busy={busy}
         onAsk={send}
+      />
+      <TryOnSheet
+        request={tryOn}
+        sessionId={sessionId}
+        photo={photo}
+        onPhoto={setPhoto}
+        onClose={() => setTryOn(null)}
       />
       <SettingsSheet
         open={openSheet === "settings"}

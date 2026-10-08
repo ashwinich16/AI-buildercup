@@ -34,6 +34,15 @@ class NarrationTask(str, Enum):
     SPEAK_COMPARISON = "speak_comparison"  # speak the Comparison agent's analysis
     CART_UPDATE = "cart_update"           # confirm what happened to the cart
     CHECKOUT_REMINDER = "checkout_reminder"  # before checkout: the one item they might have forgotten
+    OUTFIT_STEP = "outfit_step"           # options for the next piece of the outfit being put together
+    OUTFIT_DONE = "outfit_done"           # every piece picked: the whole outfit, and one offer
+
+
+# Lights up each option on screen while Scout talks about it (the frontend reads and hides the tags).
+SCREEN_CUE = ("Screen cue: right before you start talking about an option, write its tag, [[1]] for Option 1, "
+              "[[2]] for Option 2, and so on (the option numbers below). Tags are never spoken; they light up that "
+              "option on screen while you describe it. Write each tag once, at the start of the sentence that begins "
+              "that option.")
 
 
 PRESENT_OPTIONS = """{voice}
@@ -56,7 +65,7 @@ Present these options in about 80 to 120 words:
 4. Then each other option in one sentence, with the one way it differs.
 5. Mention a review point only if it matters for their need.
 6. Make the order clear as you speak (first, second...) so they can refer back.
-Screen cue: right before you start talking about an option, write its tag, [[1]] for Option 1, [[2]] for Option 2, and so on (the option numbers below). Tags are never spoken; they light up that option on screen while you describe it. Write each tag once, at the start of the sentence that begins that option.
+{cue}
 7. End with ONE easy question offering a useful next step (such as hearing one described, comparing, or hearing more).
 If there are no options, say so kindly and suggest one thing they could change.
 """
@@ -74,17 +83,17 @@ NEXT OPTIONS TO PRESENT
 
 YOUR TASK
 Make clear these are additional options, then present them: honest about [exact match] vs [related], one sentence each with what makes it different, making their order clear so they can refer back. About 60 to 100 words. End with ONE easy question.
-Screen cue: right before you start talking about an option, write its tag, [[1]] for Option 1, [[2]] for Option 2, and so on (the option numbers below). Tags are never spoken; they light up that option on screen while you describe it. Write each tag once, at the start of the sentence that begins that option.
+{cue}
 """
 
 NO_MORE_OPTIONS = """{voice}
 WHAT THE SHOPPER WANTS
 {need}
 
-They asked for more or different options, but they have already heard all {already_heard} options the shop has for this.
+They asked for more or different options. {heard}
 {other_kinds}
 YOUR TASK
-In about 30 words, say kindly and honestly that those were all the options you have for this, and offer ONE helpful change to their need that would open up new options (if other kinds are listed above, offer one or two of them). Do not invent products.
+In about 30 words, say kindly and honestly that those were all the options you have for this, and offer ONE helpful change to their need that would open up new options (if other kinds are listed above, offer one or two of them). Do not invent products, and never claim more than the line above says.
 """
 
 
@@ -142,6 +151,39 @@ In one or two short, natural sentences, like a helpful friend at the till: say t
 """
 
 
+OUTFIT_STEP = """{voice}
+You are helping them put together an outfit, one piece at a time, like a stylist friend.
+
+THE OUTFIT
+{outfit}
+
+NOW CHOOSING
+{piece}
+
+{search_note}
+
+OPTIONS FOR THIS PIECE
+{products}
+
+YOUR TASK
+{opening}
+Then present these options for this piece in about 70 to 100 words: how each would go with the occasion and with what they have picked so far, honest about [exact match] vs [related], one detail that helps them picture it, making the order clear.
+{cue}
+End by asking which one they like, or whether they would rather skip this piece. If there are no options, say so kindly and offer to skip this piece or change what you look for.
+"""
+
+
+OUTFIT_DONE = """{voice}
+They have picked every piece of their outfit.
+
+THE OUTFIT
+{outfit}
+
+YOUR TASK
+In two to four short sentences, describe the whole outfit together like a stylist friend: how the pieces work together for the occasion, and the total. Then {offer}
+"""
+
+
 class NarrationAgentBuilder:
     """Builds the Narration LlmAgent. One prompt builder per NarrationTask."""
 
@@ -154,6 +196,8 @@ class NarrationAgentBuilder:
             NarrationTask.SPEAK_COMPARISON: self._speak_comparison_prompt,
             NarrationTask.CART_UPDATE: self._cart_update_prompt,
             NarrationTask.CHECKOUT_REMINDER: self._checkout_reminder_prompt,
+            NarrationTask.OUTFIT_STEP: self._outfit_step_prompt,
+            NarrationTask.OUTFIT_DONE: self._outfit_done_prompt,
         }
 
     def build(self) -> LlmAgent:
@@ -180,6 +224,7 @@ class NarrationAgentBuilder:
 
     def _present_options_prompt(self, state: dict) -> str:
         return PRESENT_OPTIONS.format(
+            cue=SCREEN_CUE,
             voice=VOICE,
             need=state_keys.need(state).summary(),
             profile=state_keys.profile(state).to_prompt_text(),
@@ -191,6 +236,7 @@ class NarrationAgentBuilder:
         presented = state.get(state_keys.PRESENTED) or []
         already = max(len(state.get(state_keys.SEEN) or []) - len(presented), 0)
         return MORE_OPTIONS.format(
+            cue=SCREEN_CUE,
             voice=VOICE,
             need=state_keys.need(state).summary(),
             already_heard=already,
@@ -203,7 +249,7 @@ class NarrationAgentBuilder:
         return NO_MORE_OPTIONS.format(
             voice=VOICE,
             need=state_keys.need(state).summary(),
-            already_heard=len(state.get(state_keys.SEEN) or []),
+            heard=_heard_text(len(state.get(state_keys.SEEN) or [])),
             other_kinds=f"Other kinds the shop has for them: {', '.join(other_types)}.\n" if other_types else "",
         )
 
@@ -232,6 +278,46 @@ class NarrationAgentBuilder:
             suggestion=suggestion.to_prompt_text() if suggestion else "None.",
             cart=state_keys.cart(state).to_prompt_text(),
         )
+
+
+    def _outfit_step_prompt(self, state: dict) -> str:
+        outfit = state_keys.outfit(state)
+        index = outfit.current() if outfit else None
+        piece = outfit.plan.pieces[index] if index is not None else None
+        if outfit and not outfit.introduced:
+            opening = ("Start by sharing the plan in one or two sentences: the pieces you would put together for "
+                       "this occasion and why, and that you will start with this piece. Mention the pieces that "
+                       "would finish the look only as ideas for later.")
+        else:
+            opening = ("Start with a short, warm reaction to what just happened (their pick, or the piece they skipped "
+                       "or added), and say which piece comes next.")
+        return OUTFIT_STEP.format(
+            cue=SCREEN_CUE,
+            voice=VOICE,
+            outfit=outfit.to_prompt_text() if outfit else "None.",
+            piece=f"{piece.category}: {piece.looks_like} ({piece.why})" if piece else "None.",
+            search_note=_search_note(state),
+            products=_presented_text(state),
+            opening=opening,
+        )
+
+    def _outfit_done_prompt(self, state: dict) -> str:
+        outfit = state_keys.outfit(state)
+        extra = outfit.offered_extra if outfit else None
+        if extra:
+            offer = (f"ask, without any pressure, whether they would like you to find a {extra.category} to finish "
+                     f"the look ({extra.looks_like}; {extra.why}). Make clear it is optional.")
+        else:
+            offer = "ask whether you should put the whole outfit in their cart."
+        return OUTFIT_DONE.format(voice=VOICE, outfit=outfit.to_prompt_text() if outfit else "None.", offer=offer)
+
+
+def _heard_text(heard: int) -> str:
+    """What is true about the options left, said so the model cannot turn "all heard" into "none in stock"."""
+    if heard:
+        return (f"They have already heard all {heard} options the shop has that fit. The shop does have those "
+                f"{heard}: never say it has none of this kind or is out of stock.")
+    return "The shop has nothing that fits what they want now."
 
 
 def _presented_text(state: dict) -> str:
