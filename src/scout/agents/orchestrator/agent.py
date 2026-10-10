@@ -214,6 +214,7 @@ class ScoutOrchestrator(BaseAgent):
         result = await asyncio.to_thread(self.retriever.find, need, seen)
         logger.info("Retrieval for %r found %d (%d exact, relaxed: %s)", result.query_text,
                     len(result.products), len(result.exact_ids), result.relaxed)
+        result, fit_notes = await asyncio.to_thread(self._rank_for_occasion, need, result)
 
         # They rejected everything that really fits (e.g. every black pair): say so honestly, keep what they heard,
         # rather than quietly offering things that miss what they asked for.
@@ -235,9 +236,20 @@ class ScoutOrchestrator(BaseAgent):
             state_keys.SEEN: sorted(seen) + first,
             state_keys.NARRATION_TASK: NarrationTask.PRESENT_OPTIONS.value,
             state_keys.FOCUS_PRODUCT: None,
+            state_keys.FIT_NOTES: {**(state.get(state_keys.FIT_NOTES) or {}), **fit_notes},
         })
         async for event in self.narration.run_async(ctx):
             yield event
+
+    def _rank_for_occasion(self, need: ShoppingNeed, result: RetrievalResult) -> tuple[RetrievalResult, dict]:
+        """When they named an occasion (a wedding, the gym), the products best for it first; search matches
+        the words, not the occasion. Exact matches stay ahead of related ones."""
+        if self.occasion_ranker is None or not need.purpose or len(result.products) < 2:
+            return result, {}
+        kind = " or ".join(need.product_types) or need.category or "item"
+        ranked, notes = self.occasion_ranker.rank(need.purpose, kind, need.looking_for, result.products)
+        ranked.sort(key=lambda p: p.id not in result.exact_ids)      # stable: occasion order within each
+        return result.model_copy(update={"products": ranked}), notes
 
     async def _more_options(self, ctx: InvocationContext, keep_positions: list[int]):
         """Options they have not heard yet. Only ones that still fit the need: if this message tightened it

@@ -226,6 +226,7 @@ FOR THE SHOPPER'S NEW MESSAGE
    - What it is for (the occasion or use) is unclear when need.purpose is empty and the use would change which products you pick, unless the shopper said it does not matter or named a kind that already implies the use. It decides the kind, the style and what matters most, so ask it right after who it is for, before showing anything. Ask about the occasion rather than listing kinds: the occasion usually settles the kind.
    - The kind is unclear only when product_types is empty and, even with the occasion known, the shopper's words could still mean very different kinds the shop has for that person (see "Kinds of ..." in WHAT THE SHOP ACTUALLY HAS). Then ask it after the occasion.
    - Usually that is all: who it is for, what it is for, and the kind if still open. Do not ask about details the shopper has not brought up unless the options really differ by them.
+   - The kind is ALWAYS unclear when need.category is empty and product_types is empty ("something to wear", "an outfit"): there is nothing to search for yet. Ask which kind, offering the two or three kinds the shop has that suit their occasion best (from "Kinds of ..." in WHAT THE SHOP ACTUALLY HAS), or offer to plan a whole outfit.
    ready_to_search is true when still_unclear is empty, or when the shopper signals they want to see products now rather than answer more questions.
 
 4. If not ready, ask ONE question about the first item in still_unclear. Think like a friend who knows this exact product:
@@ -355,6 +356,10 @@ class ElicitationAgentBuilder:
         state[state_keys.NEXT_UP] = self._next_up(state, turn)
         message = content_text(callback_context.user_content, separator=" ")
         turn.need.avoid = self._grounded_avoid(state, turn, message)
+        if self._must_ask_kind(turn, asked):
+            logger.info("Need has no kind of product; asking which before searching.")
+            turn.ready_to_search = False
+            turn.question = turn.question or _kind_question(turn.need, self._catalog.categories())
         if self._must_ask_gender(turn, asked):
             logger.info("Need has no gender for %r; asking before searching.", turn.need.category)
             turn.ready_to_search = False
@@ -460,6 +465,12 @@ class ElicitationAgentBuilder:
         names = [*self._catalog.categories(), *self._catalog.product_types(), *GENDER_STYLES]
         return [term for term in need.avoid if not any(_whole_words(name) <= _whole_words(term) for name in names)]
 
+    def _must_ask_kind(self, turn: TurnUnderstanding, asked: int) -> bool:
+        """Never search with no kind of product at all ("something to wear for a wedding"): the search finds
+        nothing and Scout can only apologise. The prompt asks for this; this is the safety net."""
+        return (turn.intent in ("shop", "reject") and turn.ready_to_search and not turn.need.category
+                and not turn.need.product_types and asked < self._settings.elicitation_safety_max_questions)
+
     def _must_ask_gender(self, turn: TurnUnderstanding, asked: int) -> bool:
         """Never search a category the shop sells in both men's and women's styles without knowing which.
 
@@ -545,6 +556,14 @@ def _gender_question(need: ShoppingNeed) -> str:
     """Asked only when the model skipped this question; it names the category as the catalog spells it."""
     kind = " or ".join(need.product_types) or need.category or "outfit"
     return f"Happy to help! Is this for a men's or a women's style of {kind}?"
+
+
+def _kind_question(need: ShoppingNeed, categories: list[str]) -> str:
+    """Asked only when the model wanted to search with no kind of product at all."""
+    occasion = f" for {need.purpose}" if need.purpose else ""
+    offered = [c.lower() for c in categories[:3]]
+    choices = ", ".join(offered[:-1]) + f" or {offered[-1]}" if len(offered) > 1 else "".join(offered)
+    return f"Lovely! What would you like to find{occasion}: {choices}? Or I can plan a whole outfit with you."
 
 
 def _presented_products(state) -> str:

@@ -38,6 +38,7 @@ CONVERSATION = "conversation"        # every exchange, word for word (capped): [
 CART_EVENT = "cart_event"            # what just happened to the cart, for Narration to speak
 SUGGESTION = "suggestion"            # one item that goes with the cart (Recommender), or None
 SUGGESTIONS = "suggestions"          # the few options shown with it (the first is SUGGESTION), best first
+FIT_NOTES = "fit_notes"              # product id -> why it suits the occasion they named
 SUGGESTED_IDS = "suggested_ids"      # every product suggested this conversation: never suggest one twice
 SUGGESTED_KINDS = "suggested_kinds"  # kinds already suggested: never offer the same kind twice
 OFFER_OPEN = "offer_open"            # Scout offered the suggestion in its LAST reply, so a plain "yes" answers it

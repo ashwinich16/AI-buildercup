@@ -160,15 +160,16 @@ class Recommender:
         skip_ids = {item.product_id for item in cart.items} | rules.suggested_ids
         skip_kinds = {item.kind for item in cart.items if item.kind} | rules.suggested_kinds
         need = rules.need
-        budget_left = max(need.budget_max - cart.total, 0) if need.budget_max is not None else None
 
         # (cart item, rank, kind) for every kind that would complete it, searched all at once.
         plans = [(anchor, rank, kind) for anchor in anchors
                  for rank, kind in enumerate(k for k in self._kinds_for(anchor) if k not in skip_kinds)]
         if not plans:
             return []
+        # The budget they gave was for the item they were looking for ("shoes around $60"), not for what goes
+        # with it; an extra simply never costs more than the item it goes with.
         with ThreadPoolExecutor(max_workers=min(len(plans), 8)) as pool:
-            found = list(pool.map(lambda plan: self._candidates(plan[0], plan[2], budget_left, need), plans))
+            found = list(pool.map(lambda plan: self._candidates(plan[0], plan[2], plan[0].price, need), plans))
 
         scored: list[tuple[float, Suggestion]] = []
         for (anchor, rank, _kind), candidates in zip(plans, found):
@@ -203,11 +204,11 @@ class Recommender:
             logger.warning("Could not decide what goes with %s: %s", kind, error)
             return []
 
-    def _candidates(self, anchor: Product, kind: str, budget_left: Optional[float],
+    def _candidates(self, anchor: Product, kind: str, max_price: Optional[float],
                     need: ShoppingNeed) -> list[Product]:
         gender = anchor.gender if anchor.gender in ("men", "women") else need.gender_filter()
         query = SearchQuery(text=" ".join([*anchor.style_tags[:3], kind]), product_types=[kind],
-                            gender=gender, max_price=budget_left, limit=self._limit)
+                            gender=gender, max_price=max_price, limit=self._limit)
         try:
             return self._catalog.search(query)
         except Exception as error:

@@ -331,7 +331,9 @@ def _presented_text(state: dict, kept: frozenset[str] | set[str] = frozenset()) 
             "[exact match]" if state_keys.is_exact(state, product.id) else "[related]")
         evidence = _EVIDENCE.pick(product, need)
         proof = ("\nReview evidence (real quotes): " + "; ".join(e.as_text() for e in evidence)) if evidence else ""
-        blocks.append(f"Option {number} {label}:\n{product.to_prompt_text()}{proof}")
+        suits = (state.get(state_keys.FIT_NOTES) or {}).get(product.id)
+        occasion = f"\nWhy it suits {need.purpose}: {suits}" if suits and need.purpose else ""
+        blocks.append(f"Option {number} {label}:\n{product.to_prompt_text()}{proof}{occasion}")
     return "\n\n".join(blocks) or "None."
 
 

@@ -51,13 +51,20 @@ export default function SignIn({ onSignedIn }) {
 }
 
 const SHOPPER_IN_ADDRESS = /^#shopper=(.+)$/;
+const GUEST_ID = /^([a-z]+)-[0-9a-f]{8,32}$/;
+
+// A guest is a brand-new shopper each time it is picked: "<persona id>-<random>".
+const newGuestId = (persona) =>
+  `${persona.id}-${Array.from(crypto.getRandomValues(new Uint8Array(8)), (b) => b.toString(16).padStart(2, "0")).join("")}`;
 
 function DemoShoppers({ personas, onSignedIn }) {
-  const pick = (persona, resumed = false) => {
-    window.history.replaceState(null, "", `#shopper=${encodeURIComponent(persona.id)}`);
+  // `shopperId`: given when carrying on after a refresh (the same guest), else a new one for a guest.
+  const pick = (persona, resumed = false, shopperId = null) => {
+    const id = shopperId || (persona.guest ? newGuestId(persona) : persona.id);
+    window.history.replaceState(null, "", `#shopper=${encodeURIComponent(id)}`);
     onSignedIn({
-      name: persona.name,
-      credentials: demoCredentials(persona.id),
+      name: persona.guest ? "" : persona.name,
+      credentials: demoCredentials(id),
       leave: {
         label: "Switch shopper",
         action: async () => window.history.replaceState(null, "", window.location.pathname + window.location.search),
@@ -70,10 +77,11 @@ function DemoShoppers({ personas, onSignedIn }) {
   const resumedRef = useRef(false);
   useEffect(() => {
     const id = decodeURIComponent(window.location.hash.match(SHOPPER_IN_ADDRESS)?.[1] || "");
-    const persona = personas.find((p) => p.id === id);
+    const personaId = id.match(GUEST_ID)?.[1] || id;
+    const persona = personas.find((p) => p.id === personaId && Boolean(p.guest) === (personaId !== id));
     if (persona && !resumedRef.current) {
       resumedRef.current = true;
-      pick(persona, true);
+      pick(persona, true, id);
     }
   }, [personas]);
 
