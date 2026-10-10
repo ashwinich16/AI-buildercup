@@ -5,8 +5,8 @@ A voice-first shopping companion for blind and low-vision shoppers, built on Goo
 
 Scout talks with the shopper like a friend: it asks a few questions to understand the need, searches the
 catalog, describes options vividly, answers questions about a product (including what its photos show),
-compares products, keeps a cart, suggests one item that goes with what the shopper chose, styles an outfit
-for an occasion one piece at a time, shows products on the shopper's own photo (Vertex AI Virtual
+compares products, keeps a cart, suggests one item that goes with what the shopper chose, plans outfits
+for a trip or a week from the clothes the shopper already owns (only the missing pieces are bought), shows products on the shopper's own photo (Vertex AI Virtual
 Try-On), and remembers lasting preferences. The conversation is hands-free:
 the browser listens, Google Cloud Text-to-Speech speaks, and short chimes signal whose turn it is.
 
@@ -16,7 +16,7 @@ the browser listens, Google Cloud Text-to-Speech speaks, and short chimes signal
 conversationalAgent/
 ├── src/scout/
 │   ├── config.py, app.py        settings and the composition root (wires every agent)
-│   ├── domain/                  Product, ShoppingNeed, PreferenceProfile, Outfit
+│   ├── domain/                  Product, ShoppingNeed, PreferenceProfile, Capsule, WardrobeItem
 │   ├── catalog/                 CatalogRepository + Vertex AI Search implementation
 │   ├── tools/                   retrieval, catalog overview, cart, images, review evidence, recommendations, try-on
 │   ├── agents/                  orchestrator, elicitation, narration, product_expert, comparison, preference, stylist
@@ -115,6 +115,28 @@ also type. Headphones give the best results, because speakers let the microphone
 In the header settings you can choose the **listening language/accent** (English India, US, UK,
 Hindi, Telugu, Tamil), speech speed, high contrast and larger text, or switch shopper.
 
+## Test on your phone
+
+Scout runs in the phone's browser and installs like an app, so the same code serves web and phone. On a
+phone you can attach photos of your clothes straight from the camera or gallery (the camera button in
+the chat box).
+
+The microphone only works over HTTPS, so the phone needs an HTTPS address:
+
+- **Deployed (best):** deploy to Cloud Run (below) and open its `https://…run.app` address on the phone.
+- **Before deploying:** keep both terminals running, then open an HTTPS tunnel to the React app in a
+  third terminal, for example with [cloudflared](https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/downloads/):
+
+  ```bash
+  cloudflared tunnel --url http://localhost:5173
+  ```
+
+  Open the `https://….trycloudflare.com` address it prints on the phone. (`ngrok http 5173` works too.)
+
+On Android, open it in **Chrome**, then menu ⋮ → **Add to Home screen** (or **Install app**): Scout gets its own
+icon and opens full screen. With Google sign-in, add the tunnel or Cloud Run domain under Firebase
+Authentication → Settings → Authorized domains first.
+
 ## Test the agents without the UI (ADK web)
 
 ```bash
@@ -181,7 +203,7 @@ run `DELETE FROM product_intelligence;` first.
 | `GOOGLE_CLOUD_PROJECT`, `GOOGLE_CLOUD_LOCATION`, `GOOGLE_GENAI_USE_VERTEXAI` | Gemini on Vertex AI |
 | `SCOUT_AGENT_MODEL` | default model for every agent |
 | `SCOUT_TRY_ON_MODEL` | Vertex AI Virtual Try-On model (default `virtual-try-on-001`), called in `GOOGLE_CLOUD_LOCATION` |
-| `SCOUT_<AGENT>_MODEL / _TEMPERATURE / _THINKING_BUDGET` | per-agent tuning (elicitation, narration, product_expert, comparison, preference, recommender, stylist) |
+| `SCOUT_<AGENT>_MODEL / _TEMPERATURE / _THINKING_BUDGET` | per-agent tuning (elicitation, narration, product_expert, comparison, preference, recommender, stylist, wardrobe) |
 | `SCOUT_SEARCH_LOCATION`, `SCOUT_SEARCH_ENGINE_ID` or `SCOUT_SEARCH_DATA_STORE_ID` | Vertex AI Search (the data store id is also needed to look up saved cart items for the checkout suggestion) |
 | `SCOUT_AUTH_MODE` | `demo` (persona picker) or `firebase` (real sign-in) |
 | `SCOUT_TTS_VOICE` | Cloud Text-to-Speech voice |

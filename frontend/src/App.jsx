@@ -8,15 +8,19 @@ import ScoutStage from "./components/ScoutStage.jsx";
 import Composer from "./components/Composer.jsx";
 import ProductList from "./components/ProductList.jsx";
 import PairsWith from "./components/PairsWith.jsx";
-import OutfitStrip from "./components/OutfitStrip.jsx";
+import CapsuleBoard from "./components/CapsuleBoard.jsx";
+import WardrobeSheet from "./components/WardrobeSheet.jsx";
 import TryOnSheet from "./components/TryOnSheet.jsx";
 import CartSheet from "./components/CartSheet.jsx";
 import SettingsSheet from "./components/SettingsSheet.jsx";
 
-const EMPTY_SCREEN = { products: [], cart: { items: [], total: 0 }, focus_product_id: null, suggestion: null, outfit: null };
+const EMPTY_SCREEN = {
+  products: [], cart: { items: [], total: 0 }, focus_product_id: null, suggestion: null, capsule: null, wardrobe: [],
+};
 // What to show, from any API response that carries it (session start, streamed screen, end of turn).
-const screenOf = ({ products, cart, focus_product_id, suggestion, outfit }) => ({
-  products, cart, focus_product_id, suggestion, outfit,
+// The wardrobe is left out of mid-turn updates (it carries photos), so the last one shown is kept then.
+const screenOf = ({ products, cart, focus_product_id, suggestion, capsule, wardrobe }, current = EMPTY_SCREEN) => ({
+  products, cart, focus_product_id, suggestion, capsule, wardrobe: wardrobe ?? current.wardrobe,
 });
 const DEFAULT_SETTINGS = {
   voice: true, rate: 1, language: "en-IN", highContrast: false, largeText: false, headphones: false,
@@ -47,12 +51,14 @@ export default function App() {
   const [paused, setPaused] = useState(false);
   const [settings, setSettings] = useState(DEFAULT_SETTINGS);
   const [announcement, setAnnouncement] = useState("");
-  const [openSheet, setOpenSheet] = useState(null); // "cart", "settings" or null
+  const [openSheet, setOpenSheet] = useState(null); // "cart", "wardrobe", "settings" or null
   const [spokenOption, setSpokenOption] = useState(null); // position of the option Scout is describing right now
   const [assistantWidth, setAssistantWidth] = useState(DEFAULT_ASSISTANT_WIDTH); // the Scout panel, in pixels
-  const [categories, setCategories] = useState([]);
+  const [categories, setCategories] = useState([]); // what the shop sells, offered as first things to ask for
   const [tryOn, setTryOn] = useState(null); // what to try on: { productIds, label }, or null
-  const [photo, setPhoto] = useState(null); // the shopper's photo for try-on, kept only while the page is open // what the shop sells, offered as first things to ask for
+  const [photo, setPhoto] = useState(null); // the shopper's photo for try-on, kept only while the page is open
+  const [attachments, setAttachments] = useState([]); // clothes photos attached in the chat: { id, preview, status, note }
+  const [choices, setChoices] = useState([]); // short answers to Scout's last question, to tap
 
   const speaker = useSpeaker();
   const { speak, startStream, stop: stopSpeaking, isEcho, audibleAt } = speaker;
@@ -64,6 +70,7 @@ export default function App() {
   const queuedRef = useRef(null); // what the shopper said while Scout was still finishing a turn
   const sessionRef = useRef(null);
   const listeningRef = useRef(false);
+  const photosRef = useRef({ reading: [], count: 0 }); // attached photos still being read, and how many are attached
 
   useEffect(() => {
     document.documentElement.dataset.contrast = settings.highContrast ? "high" : "normal";
@@ -96,10 +103,16 @@ export default function App() {
       stopSpeaking();
       setSpokenOption(null);
       setPaused(false);
-      setMessages((all) => [...all, message("shopper", text)]);
+      setChoices([]);
+      const photos = photosRef.current;
+      photosRef.current = { reading: [], count: 0 };
+      const said = photos.count ? `${text} (${photos.count} ${photos.count === 1 ? "photo" : "photos"})` : text;
+      setMessages((all) => [...all, message("shopper", said)]);
       busyRef.current = true;
       setBusy(true);
       earcons.thinking();
+      await Promise.allSettled(photos.reading); // photos are read as they are attached; usually already done
+      setAttachments([]);
 
       // Scout's words are shown and spoken while they are still being written.
       const reply = message("scout", "");
@@ -138,7 +151,7 @@ export default function App() {
               if (cue) setSpokenOption(Number(cue[1]));
             }
           } else if (item.type === "screen" || item.type === "done") {
-            setScreen(screenOf(item));
+            setScreen((current) => screenOf(item, current));
           }
         });
         if (turn.action === "pause") {
@@ -151,6 +164,7 @@ export default function App() {
             earcons.goodbye();
           };
         }
+        setChoices(turn.choices || []);
         setAnnouncement(stripCues(turn.reply));
         if (voice) voice.end();
         else afterSpeaking();
@@ -167,6 +181,24 @@ export default function App() {
     },
     [stopSpeaking, startStream, scoutSays, yourTurn]
   );
+
+  // Photos of their clothes, attached in the chat: each is read straight away (while they type), so Scout
+  // already knows the pieces when the message is sent.
+  const attachPhotos = (files) => {
+    for (const file of files) {
+      const id = `${Date.now()}-${Math.random()}`;
+      const update = (change) => setAttachments((all) => all.map((p) => (p.id === id ? { ...p, ...change } : p)));
+      setAttachments((all) => [...all, { id, preview: URL.createObjectURL(file), status: "reading", note: "Reading…" }]);
+      const reading = api
+        .addToWardrobe(sessionRef.current, file)
+        .then(({ wardrobe, added }) => {
+          update({ status: "done", note: added.map((item) => item.description).join(", ") });
+          setScreen((current) => ({ ...current, wardrobe }));
+        })
+        .catch((error) => update({ status: "failed", note: error.message }));
+      photosRef.current = { reading: [...photosRef.current.reading, reading], count: photosRef.current.count + 1 };
+    }
+  };
 
   // Is this the shopper talking over Scout, rather than Scout's own voice coming back?
   const isInterruption = (text) =>
@@ -259,7 +291,7 @@ export default function App() {
 
   if (!shopper) return <SignIn onSignedIn={startShopping} />;
 
-  const hasProducts = screen.products.length > 0 || Boolean(screen.outfit);   // something to show beside Scout
+  const hasProducts = screen.products.length > 0 || Boolean(screen.capsule);   // something to show beside Scout
 
   return (
     <div className="app">
@@ -270,6 +302,7 @@ export default function App() {
         shopper={shopper}
         cartCount={screen.cart.items?.length || 0}
         onOpenCart={() => setOpenSheet("cart")}
+        onOpenWardrobe={() => setOpenSheet("wardrobe")}
         onOpenSettings={() => setOpenSheet("settings")}
         onLeave={leave}
       />
@@ -286,12 +319,19 @@ export default function App() {
       >
         {hasProducts && (
           <section className="layout__shop" aria-label="Options">
-            <OutfitStrip outfit={screen.outfit} busy={busy} onAsk={send} onTryOn={setTryOn} />
+            <CapsuleBoard
+              capsule={screen.capsule}
+              busy={busy}
+              onAsk={send}
+              onTryOn={setTryOn}
+              onOpenWardrobe={() => setOpenSheet("wardrobe")}
+            />
             <ProductList
               products={screen.products}
               focusId={screen.focus_product_id}
               spokenPosition={spokenOption}
               busy={busy || !sessionId}
+              choosingFor={screen.capsule?.new_pieces.find((piece) => piece.current)?.category}
               onAsk={send}
               onTryOn={setTryOn}
             />
@@ -310,6 +350,7 @@ export default function App() {
             voiceInput={voiceInput}
             empty={!hasProducts}
             starters={categories}
+            choices={busy ? [] : choices}
             onToggleListening={toggleListening}
             onAsk={send}
           />
@@ -319,6 +360,8 @@ export default function App() {
             paused={paused}
             ready={Boolean(sessionId)}
             voiceInput={voiceInput}
+            attachments={attachments}
+            onAttach={attachPhotos}
             onToggleListening={toggleListening}
             onSend={send}
             onStopSpeaking={() => {
@@ -336,6 +379,13 @@ export default function App() {
         suggestion={screen.suggestion}
         busy={busy}
         onAsk={send}
+      />
+      <WardrobeSheet
+        open={openSheet === "wardrobe"}
+        onClose={() => setOpenSheet(null)}
+        sessionId={sessionId}
+        wardrobe={screen.wardrobe || []}
+        onWardrobe={(wardrobe) => setScreen((current) => ({ ...current, wardrobe }))}
       />
       <TryOnSheet
         request={tryOn}

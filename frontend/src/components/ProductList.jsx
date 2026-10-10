@@ -11,7 +11,8 @@ const QUICK_ACTIONS = [
   "Describe the first one",
 ];
 
-export default function ProductList({ products, focusId, spokenPosition, busy, onAsk, onTryOn }) {
+// `choosingFor`: while an outfit is put together piece by piece, the piece these options are for.
+export default function ProductList({ products, focusId, spokenPosition, busy, choosingFor, onAsk, onTryOn }) {
   // Keep the option Scout is talking about in view: the one being described right now, else the focus.
   const spokenId = products.find((p) => p.position === spokenPosition)?.id;
   const inView = spokenId || focusId;
@@ -26,8 +27,8 @@ export default function ProductList({ products, focusId, spokenPosition, busy, o
       <div className="results__head">
         <div>
           <h2 id="results-title" className="results__title">
-            {products.length} {products.length === 1 ? "option" : "options"} for you.{" "}
-            <span className="muted">Picked from what you asked.</span>
+            {products.length} {products.length === 1 ? "option" : "options"} {choosingFor ? `for your ${choosingFor}` : "for you"}.{" "}
+            <span className="muted">{choosingFor ? "Choose one for the outfit." : "Picked from what you asked."}</span>
           </h2>
           <p className="results__hint muted">Say "tell me about the first one", or use the buttons.</p>
         </div>
@@ -41,6 +42,7 @@ export default function ProductList({ products, focusId, spokenPosition, busy, o
               focused={product.id === focusId}
               speaking={product.id === spokenId}
               busy={busy}
+              choosing={Boolean(choosingFor)}
               onAsk={onAsk}
               onTryOn={onTryOn}
             />
@@ -66,7 +68,7 @@ export default function ProductList({ products, focusId, spokenPosition, busy, o
   );
 }
 
-function ProductCard({ product, focused, speaking, busy, onAsk, onTryOn }) {
+function ProductCard({ product, focused, speaking, busy, choosing, onAsk, onTryOn }) {
   const position = ORDINALS[product.position - 1] || `Option ${product.position}`;
   const describe = () => onAsk(`Describe option ${product.position} in detail`);
   // The strongest quote, plus a heads-up if reviewers flag one: enough to judge at a glance and keep
@@ -150,9 +152,15 @@ function ProductCard({ product, focused, speaking, busy, onAsk, onTryOn }) {
           <button className="button button--secondary" disabled={busy} onClick={describe}>
             Describe
           </button>
-          <button className="button" disabled={busy} onClick={() => onAsk(`Add option ${product.position} to my cart`)}>
-            Add to cart
-          </button>
+          {choosing ? (
+            <button className="button" disabled={busy} onClick={() => onAsk(`I'll choose option ${product.position} for the outfit`)}>
+              Choose this
+            </button>
+          ) : (
+            <button className="button" disabled={busy} onClick={() => onAsk(`Add option ${product.position} to my cart`)}>
+              Add to cart
+            </button>
+          )}
           <button
             className="button button--ghost card__try"
             onClick={() => onTryOn({ productIds: [product.id], label: product.name })}

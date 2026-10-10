@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import Icon from "./Icons.jsx";
 
-export default function Header({ shopper, cartCount, onOpenCart, onOpenSettings, onLeave }) {
+export default function Header({ shopper, cartCount, onOpenCart, onOpenWardrobe, onOpenSettings, onLeave }) {
   // A small bump on the cart count when something is added, so the change is noticed.
   const [bumped, setBumped] = useState(false);
   const previous = useRef(cartCount);
@@ -26,7 +26,13 @@ export default function Header({ shopper, cartCount, onOpenCart, onOpenSettings,
         {shopper.name && <span className="header__who muted">Shopping as {shopper.name}</span>}
       </div>
 
-      <nav className="header__actions" aria-label="Cart and settings">
+      <nav className="header__actions" aria-label="Wardrobe, cart and settings">
+        <button className="icon-button" onClick={onOpenWardrobe} aria-label="Your wardrobe">
+          <Icon name="hanger" />
+          <span className="header__label" aria-hidden="true">
+            Wardrobe
+          </span>
+        </button>
         <button className="icon-button" onClick={onOpenCart} aria-label={`Cart, ${items}`}>
           <Icon name="bag" />
           <span className="header__label" aria-hidden="true">

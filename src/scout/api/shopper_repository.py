@@ -23,7 +23,7 @@ from typing import Callable
 from pydantic import BaseModel, Field
 
 from scout.config import Settings
-from scout.domain import Preference, PreferenceProfile
+from scout.domain import Preference, PreferenceProfile, WardrobeItem
 from scout.tools import Cart, CartItem
 
 logger = logging.getLogger(__name__)
@@ -35,6 +35,7 @@ class ShopperMemory(BaseModel):
     preferred_name: str = ""               # what they asked Scout to call them
     preferences: PreferenceProfile = Field(default_factory=PreferenceProfile)
     cart: Cart = Field(default_factory=Cart)
+    wardrobe: list[WardrobeItem] = Field(default_factory=list)   # clothes they already own
 
 
 class ShopperRepository(ABC):
@@ -90,6 +91,15 @@ class CloudSqlShopperRepository(ShopperRepository):
             PRIMARY KEY (user_id, product_id)
         )""",
         "ALTER TABLE cart_item ADD COLUMN IF NOT EXISTS kind TEXT",   # added later; older tables lack it
+        """CREATE TABLE IF NOT EXISTS wardrobe_item (
+            user_id     TEXT NOT NULL,
+            item_id     TEXT NOT NULL,
+            category    TEXT NOT NULL,
+            description TEXT NOT NULL,
+            thumbnail   TEXT,
+            added_at    TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            PRIMARY KEY (user_id, item_id)
+        )""",
     ]
 
     def __init__(self, connect: Callable[[], object]):
@@ -129,11 +139,16 @@ class CloudSqlShopperRepository(ShopperRepository):
         items = [CartItem(product_id=pid, name=name, price=None if price is None else float(price), kind=kind)
                  for pid, name, price, kind in cursor.fetchall()]
 
+        cursor.execute("SELECT item_id, category, description, thumbnail FROM wardrobe_item "
+                       "WHERE user_id = %s ORDER BY added_at", (user_id,))
+        wardrobe = [WardrobeItem(id=i, category=c, description=d, thumbnail=t) for i, c, d, t in cursor.fetchall()]
+
         return ShopperMemory(
             known=True,
             preferred_name=shopper[0],
             preferences=PreferenceProfile(preferences=preferences),
             cart=Cart(items=items),
+            wardrobe=wardrobe,
         )
 
     # ----- writing -----
@@ -149,6 +164,21 @@ class CloudSqlShopperRepository(ShopperRepository):
             (user_id, memory.preferred_name))
         self._save_preferences(cursor, user_id, memory.preferences.preferences)
         self._save_cart(cursor, user_id, memory.cart.items)
+        self._save_wardrobe(cursor, user_id, memory.wardrobe)
+
+    @staticmethod
+    def _save_wardrobe(cursor, user_id: str, items: list[WardrobeItem]) -> None:
+        wanted = {item.id for item in items}
+        cursor.execute("SELECT item_id FROM wardrobe_item WHERE user_id = %s", (user_id,))
+        for (item_id,) in cursor.fetchall():
+            if item_id not in wanted:                       # taken out of the wardrobe
+                cursor.execute("DELETE FROM wardrobe_item WHERE user_id = %s AND item_id = %s", (user_id, item_id))
+        for item in items:
+            cursor.execute(
+                "INSERT INTO wardrobe_item (user_id, item_id, category, description, thumbnail) "
+                "VALUES (%s, %s, %s, %s, %s) ON CONFLICT (user_id, item_id) DO UPDATE SET "
+                "category = EXCLUDED.category, description = EXCLUDED.description",
+                (user_id, item.id, item.category, item.description, item.thumbnail))
 
     @staticmethod
     def _save_preferences(cursor, user_id: str, preferences: list[Preference]) -> None:

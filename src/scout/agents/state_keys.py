@@ -8,7 +8,7 @@ user-scoped: they belong to the shopper and are shared across their sessions.
 
 from typing import Optional
 
-from scout.domain import Outfit, PreferenceProfile, Product, ShoppingNeed
+from scout.domain import Capsule, PreferenceProfile, Product, ShoppingNeed, WardrobeItem
 from scout.tools.cart import Cart
 from scout.tools.recommendations import Suggestion
 
@@ -41,10 +41,12 @@ OFFER_OPEN = "offer_open"            # Scout offered the suggestion in its LAST 
 OFFER_AT_CHECKOUT = "offer_at_checkout"  # that offer came at checkout: declining it means "check me out"
 CHECKOUT_REMINDED = "checkout_reminded"  # the one reminder before checkout was already given
 
-# Styling an outfit for an occasion
-STYLIST_PLAN = "stylist_plan"        # the Stylist agent's latest OutfitPlan
-OUTFIT = "outfit"                    # the Outfit being put together (plan + pieces picked), or None
-OUTFIT_REQUESTED = "outfit_requested"  # asked for, waiting on one question (whose style): {"pieces": [...]}
+# Planning outfits for any occasion (a trip, a week, a day at the office...)
+STYLIST_PLAN = "stylist_plan"        # the Stylist agent's latest CapsulePlan
+CAPSULE = "capsule"                  # the plan on the board (looks + the products chosen for new pieces), or None
+OUTFIT_REQUESTED = "outfit_requested"  # asked for, waiting on one question (whose style): True or None
+CAPSULE_EVENT = "capsule_event"      # what just happened to the plan, in plain words, for Narration to speak
+CAPSULE_PLANNED = "A new plan was just made."   # the CAPSULE_EVENT for a fresh plan
 PREFERENCE_EVIDENCE = "preference_evidence"  # what the Preference agent should learn from this turn
 
 # What Scout remembers about the shopper. Loaded from the ShopperRepository (Cloud SQL)
@@ -52,6 +54,8 @@ PREFERENCE_EVIDENCE = "preference_evidence"  # what the Preference agent should 
 SHOPPER_NAME = "shopper_name"        # what the shopper asked Scout to call them
 CART = "cart"
 PREFERENCES = "preferences"
+WARDROBE = "wardrobe"                # clothes they already own (list of WardrobeItem dicts)
+WARDROBE_JUST_ADDED = "wardrobe_just_added"  # ids of pieces added from photos since Scout last replied
 
 # Kept by ADK across this shopper's sessions (in memory); moves to BigQuery with the analytics work
 REQUESTED_CATEGORIES = "user:requested_categories"  # categories they asked for that the catalog lacks
@@ -100,10 +104,15 @@ def suggestion(state) -> Optional[Suggestion]:
     return Suggestion.model_validate(raw) if raw else None
 
 
-def outfit(state) -> Optional[Outfit]:
-    """The outfit being put together, if any."""
-    raw = state.get(OUTFIT)
-    return Outfit.model_validate(raw) if raw else None
+def capsule(state) -> Optional[Capsule]:
+    """The outfit plan on the board, if any."""
+    raw = state.get(CAPSULE)
+    return Capsule.model_validate(raw) if raw else None
+
+
+def wardrobe(state) -> list[WardrobeItem]:
+    """The clothes the shopper already owns."""
+    return [WardrobeItem.model_validate(item) for item in state.get(WARDROBE) or []]
 
 
 def recent_turns_text(state) -> str:

@@ -49,7 +49,8 @@ AGENT_TUNING_DEFAULTS = {
     "comparison": AgentTuning(temperature=0.2, thinking_budget=2048),       # deepest reasoning, consistent
     "preference": AgentTuning(temperature=0.2, thinking_budget=1024),       # runs after the reply: no rush
     "recommender": AgentTuning(temperature=0.2, thinking_budget=0),         # which kinds go together (cached)
-    "stylist": AgentTuning(temperature=0.6, thinking_budget=512),           # plans an outfit for an occasion
+    "stylist": AgentTuning(temperature=0.6, thinking_budget=512),           # plans looks from the wardrobe
+    "wardrobe": AgentTuning(temperature=0.2, thinking_budget=0),            # describes a photo of owned clothes
 }
 
 

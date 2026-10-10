@@ -7,6 +7,9 @@ Scout web API (FastAPI). Serves the React app and these endpoints:
                             to show (newline-delimited JSON)
   POST /api/speech          Scout's reply as natural speech (MP3)
   POST /api/try-on          the shopper's photo wearing the chosen products (PNG); the photo is never stored
+  POST /api/wardrobe        add the pieces they own in a photo (only a small thumbnail is kept); the chat
+                            sends each photo as soon as it is attached, so it is read before they press send
+  DELETE /api/wardrobe/{id} take a piece out of their wardrobe
 
 The shopper (id and name) always comes from the Authenticator, never from the
 request body, so one shopper can never read or change another shopper's
@@ -40,6 +43,7 @@ from scout.catalog import SearchQuery
 from scout.config import Settings, get_settings
 from scout.tools import ImageFetcher
 from scout.tools.try_on import TryOnError, TryOnStudio
+from scout.tools.wardrobe import WardrobeTagger
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -68,6 +72,13 @@ class TryOnRequest(BaseModel):
     mime_type: str = Field(default="image/jpeg", pattern=r"^image/(jpeg|png)$")   # what the model accepts
 
 
+class WardrobePhotoRequest(BaseModel):
+    session_id: str
+    photo: str                                   # the piece of clothing, base64
+    mime_type: str = Field(default="image/jpeg", pattern=r"^image/(jpeg|png|webp)$")
+    thumbnail: str = Field(default="", max_length=200_000)   # small data URL made by the browser, kept to show it
+
+
 MAX_PHOTO_BYTES = 10 * 1024 * 1024   # Vertex AI Virtual Try-On's input limit
 
 
@@ -85,6 +96,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     auth = build_authenticator(settings)
     speech = SpeechSynthesizer(settings.tts_voice)
     studio = TryOnStudio(settings, ImageFetcher())
+    tagger = WardrobeTagger(settings, catalog)
     personas = load_personas()
 
     # Warm every cloud connection at start-up and keep it warm, so no shopper waits for a cold start.
@@ -161,6 +173,37 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         except TryOnError as error:
             raise HTTPException(status_code=422, detail=str(error))
         return Response(content=image, media_type="image/png")
+
+    @app.post("/api/wardrobe")
+    async def add_to_wardrobe(body: WardrobePhotoRequest, shopper: Shopper = Depends(current_shopper)) -> dict:
+        try:
+            await chat.ensure_session(shopper.id, body.session_id)
+            photo = base64.b64decode(body.photo, validate=True)
+        except LookupError:
+            raise HTTPException(status_code=404, detail="Conversation not found. Please start again.")
+        except binascii.Error:
+            raise HTTPException(status_code=400, detail="That photo couldn't be read.")
+        if len(photo) > MAX_PHOTO_BYTES:
+            raise HTTPException(status_code=413, detail="That photo is too large. Please use one under 10 MB.")
+        try:
+            items = await asyncio.to_thread(tagger.from_photo, photo, body.mime_type, body.thumbnail or None)
+        except Exception:
+            logger.exception("Could not read a wardrobe photo for %s", shopper.id)
+            items = []
+        if not items:
+            raise HTTPException(status_code=422, detail="I couldn't make out any clothes in that photo. "
+                                                        "Could you try a clearer one?")
+        wardrobe = await chat.add_to_wardrobe(shopper.id, body.session_id, items)
+        return {"wardrobe": [i.model_dump() for i in wardrobe], "added": [i.model_dump() for i in items]}
+
+    @app.delete("/api/wardrobe/{item_id}")
+    async def remove_from_wardrobe(item_id: str, session_id: str,
+                                   shopper: Shopper = Depends(current_shopper)) -> list[dict]:
+        try:
+            wardrobe = await chat.remove_from_wardrobe(shopper.id, session_id, item_id)
+        except LookupError:
+            raise HTTPException(status_code=404, detail="Conversation not found. Please start again.")
+        return [i.model_dump() for i in wardrobe]
 
     if FRONTEND_DIST.exists():               # the built React app, served from the same Cloud Run service
         app.mount("/", StaticFiles(directory=FRONTEND_DIST, html=True), name="frontend")

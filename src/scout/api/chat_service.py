@@ -6,7 +6,7 @@ Two kinds of memory:
   - the ADK session (in memory): only the current conversation, such as what is
     being searched and which options were just presented
   - the ShopperRepository (Cloud SQL): what Scout remembers about the shopper
-    (name, preferences, cart). It is loaded into the session when a conversation
+    (name, preferences, cart, the clothes they own). It is loaded into the session when a conversation
     starts, and saved after any turn that changed it.
 """
 
@@ -17,6 +17,7 @@ from typing import AsyncIterator, Optional
 
 from google.adk.agents import BaseAgent
 from google.adk.agents.run_config import RunConfig, StreamingMode
+from google.adk.events import Event, EventActions
 from google.adk.runners import Runner
 from google.adk.sessions import InMemorySessionService
 from google.genai import types
@@ -26,7 +27,7 @@ from scout.agents import state_keys
 from scout.agents.elicitation import read_turn
 from scout.agents.model_io import content_text
 from scout.api.shopper_repository import ShopperMemory, ShopperRepository
-from scout.domain import Preference, PreferenceProfile, Product
+from scout.domain import Capsule, Preference, PreferenceProfile, Product, WardrobeItem
 from scout.tools import Cart, CartItem, EvidencePicker
 
 logger = logging.getLogger(__name__)
@@ -60,7 +61,7 @@ class CartView(BaseModel):
 
 
 class SmallProductCard(BaseModel):
-    """A product shown small: the suggested item, or a picked piece of an outfit."""
+    """A product shown small: the suggested item, or a new piece on the outfit board."""
     id: str
     name: str
     price: Optional[float] = None
@@ -70,17 +71,43 @@ class SmallProductCard(BaseModel):
     reasons: list[str] = Field(default_factory=list)
 
 
-class OutfitPieceView(BaseModel):
-    kind: str                            # the catalog category, e.g. "trousers"
-    looks_like: str = ""
-    picked: Optional[SmallProductCard] = None   # the product chosen for it, once picked
+class BoardTile(BaseModel):
+    """One piece of a look: something they own, or a new piece from the shop."""
+    description: str
+    image_url: Optional[str] = None
+    owned: bool = False
+    why: str = ""                                          # for a piece better left at home: the reason
+    pending: bool = False                                  # guided: a new piece not chosen yet (an empty slot)
+    current: bool = False                                  # guided: the piece being chosen now
 
 
-class OutfitView(BaseModel):
-    """The outfit being put together: every piece, picked or still to choose."""
+class LookView(BaseModel):
+    title: str                                             # e.g. "Day 1 · client meeting"
+    why: str = ""
+    tiles: list[BoardTile] = Field(default_factory=list)
+    product_ids: list[str] = Field(default_factory=list)   # the new pieces in it, to try the look on
+
+
+class NewPieceView(BaseModel):
+    key: str
+    category: str
+    why: str = ""
+    looks: int = 0                                         # how many looks it is worn in
+    product: Optional[SmallProductCard] = None             # None: not chosen yet, skipped, or none in the shop
+    current: bool = False                                  # guided: being chosen now
+    skipped: bool = False
+
+
+class CapsuleView(BaseModel):
+    """The outfit board: one look per day or occasion, and the few new pieces to buy."""
     occasion: str
-    pieces: list[OutfitPieceView] = Field(default_factory=list)
+    looks: list[LookView] = Field(default_factory=list)
+    packed: list[BoardTile] = Field(default_factory=list)          # their own pieces that work for the trip
+    leave_at_home: list[BoardTile] = Field(default_factory=list)   # their own pieces that don't, and why
+    new_pieces: list[NewPieceView] = Field(default_factory=list)
     total: float = 0.0
+    budget: Optional[float] = None
+    guided: bool = False                                   # they choose each new piece, one at a time
 
 
 class ScreenState(BaseModel):
@@ -88,12 +115,14 @@ class ScreenState(BaseModel):
     focus_product_id: Optional[str] = None
     cart: CartView = Field(default_factory=CartView)
     suggestion: Optional[SmallProductCard] = None
-    outfit: Optional[OutfitView] = None
+    capsule: Optional[CapsuleView] = None
+    wardrobe: list[WardrobeItem] = Field(default_factory=list)
 
 
 class ChatTurn(ScreenState):
     reply: str
     action: Optional[str] = None      # "pause" (go quiet, keep listening) or "end" (stop listening)
+    choices: list[str] = Field(default_factory=list)   # short answers to Scout's question, to tap
 
 
 class StartedSession(ScreenState):
@@ -167,7 +196,8 @@ class ScoutChatService:
                 replies.append(whole)
             streamed = False
             state = (await self._get(user_id, session_id)).state
-            yield {"type": "screen", **_screen_from_state(state).model_dump(mode="json")}
+            # The wardrobe (with its thumbnails) is sent once, at the end of the turn, not with every update.
+            yield {"type": "screen", **_screen_from_state(state).model_dump(mode="json", exclude={"wardrobe"})}
 
         session = await self._get(user_id, session_id)
         await self._remember(user_id, before, _memory_from_state(session.state))
@@ -177,7 +207,8 @@ class ScoutChatService:
         if not reply and action != "pause":
             reply = "Sorry, I lost my train of thought. Could you say that again?"
             yield {"type": "delta", "text": reply}
-        done = ChatTurn(reply=reply, action=action, **_screen_from_state(session.state).model_dump())
+        choices = turn.choices if turn and turn.question and not turn.ready_to_search else []
+        done = ChatTurn(reply=reply, action=action, choices=choices, **_screen_from_state(session.state).model_dump())
         yield {"type": "done", **done.model_dump(mode="json")}
 
     async def ensure_session(self, user_id: str, session_id: str) -> None:
@@ -185,16 +216,41 @@ class ScoutChatService:
         await self._get(user_id, session_id)
 
     async def products(self, user_id: str, session_id: str, product_ids: list[str]) -> list[Product]:
-        """Products this conversation has shown (options, the suggestion, outfit pieces), in the order asked.
-        Raises LookupError if this shopper has no such conversation."""
+        """Products this conversation has shown (options, the suggestion, the board's new pieces), in the
+        order asked. Raises LookupError if this shopper has no such conversation."""
         state = (await self._get(user_id, session_id)).state
         known = dict(state_keys.shortlist(state))
-        suggestion, outfit = state_keys.suggestion(state), state_keys.outfit(state)
+        suggestion, capsule = state_keys.suggestion(state), state_keys.capsule(state)
         if suggestion:
             known[suggestion.product.id] = suggestion.product
-        if outfit:
-            known.update({product.id: product for product in outfit.chosen()})
+        if capsule:
+            known.update({product.id: product for product in capsule.products_to_buy()})
         return [known[i] for i in product_ids if i in known]
+
+    async def add_to_wardrobe(self, user_id: str, session_id: str, added: list[WardrobeItem]) -> list[WardrobeItem]:
+        """Remember pieces the shopper owns (from a photo). Scout mentions them in its next reply.
+        Returns the whole wardrobe."""
+        return await self._change_wardrobe(user_id, session_id, lambda items: [*items, *added],
+                                           just_added=[item.id for item in added])
+
+    async def remove_from_wardrobe(self, user_id: str, session_id: str, item_id: str) -> list[WardrobeItem]:
+        return await self._change_wardrobe(user_id, session_id,
+                                           lambda items: [i for i in items if i.id != item_id])
+
+    async def _change_wardrobe(self, user_id: str, session_id: str, change,
+                               just_added: Optional[list[str]] = None) -> list[WardrobeItem]:
+        """Change the wardrobe in this conversation (so Scout knows at once) and in the shopper's memory."""
+        session = await self._get(user_id, session_id)
+        before = _memory_from_state(session.state)
+        wardrobe = change(state_keys.wardrobe(session.state))
+        kept = {item.id for item in wardrobe}
+        shown = [i for i in [*(session.state.get(state_keys.WARDROBE_JUST_ADDED) or []), *(just_added or [])]
+                 if i in kept]
+        delta = {state_keys.WARDROBE: [item.model_dump() for item in wardrobe],
+                 state_keys.WARDROBE_JUST_ADDED: shown}
+        await self._sessions.append_event(session, Event(author="user", actions=EventActions(state_delta=delta)))
+        await self._remember(user_id, before, before.model_copy(update={"wardrobe": wardrobe}))
+        return wardrobe
 
     async def _get(self, user_id: str, session_id: str):
         session = await self._sessions.get_session(app_name=APP_NAME, user_id=user_id, session_id=session_id)
@@ -217,6 +273,7 @@ def _state_from_memory(memory: ShopperMemory) -> dict:
         state_keys.SHOPPER_NAME: memory.preferred_name,
         state_keys.PREFERENCES: memory.preferences.model_dump(),
         state_keys.CART: memory.cart.model_dump(),
+        state_keys.WARDROBE: [item.model_dump() for item in memory.wardrobe],
     }
 
 
@@ -226,6 +283,7 @@ def _memory_from_state(state: dict) -> ShopperMemory:
         preferred_name=state.get(state_keys.SHOPPER_NAME) or "",
         preferences=state_keys.profile(state),
         cart=state_keys.cart(state),
+        wardrobe=state_keys.wardrobe(state),
     )
 
 
@@ -244,7 +302,8 @@ def _greeting(name: str, returning: bool, cart: Cart) -> str:
 
 
 # The two ways to shop with Scout, offered at the start of every conversation.
-_TWO_WAYS = "Shall we plan an outfit together for an occasion, or are you shopping for something in particular?"
+_TWO_WAYS = ("Shall we plan an outfit together, using the clothes you already own, "
+             "or are you shopping for something in particular?")
 
 
 # Formatting a model may still add (bold/italic asterisks, headings, code marks, bullet dashes).
@@ -281,7 +340,8 @@ def _screen_from_state(state: dict) -> ScreenState:
     cart = state_keys.cart(state)
     return ScreenState(products=cards, focus_product_id=state.get(state_keys.FOCUS_PRODUCT),
                        cart=CartView(items=cart.items, total=cart.total),
-                       suggestion=_suggestion_card(state), outfit=_outfit_view(state))
+                       suggestion=_suggestion_card(state), capsule=_capsule_view(state.get(state_keys.CAPSULE)),
+                       wardrobe=state_keys.wardrobe(state))
 
 
 def _suggestion_card(state: dict) -> Optional[SmallProductCard]:
@@ -292,14 +352,38 @@ def _suggestion_card(state: dict) -> Optional[SmallProductCard]:
                                                              "reasons": suggestion.reasons})
 
 
-def _outfit_view(state: dict) -> Optional[OutfitView]:
-    outfit = state_keys.outfit(state)
-    if outfit is None:
+def _capsule_view(raw: Optional[dict]) -> Optional[CapsuleView]:
+    if not raw:
         return None
-    pieces = [OutfitPieceView(kind=piece.category, looks_like=piece.looks_like,
-                              picked=_small_card(product) if product else None)
-              for piece, product in zip(outfit.plan.pieces, outfit.picked)]
-    return OutfitView(occasion=outfit.plan.occasion, pieces=pieces, total=outfit.total())
+    capsule = Capsule.model_validate(raw)
+    owned = {item.id: item for item in capsule.wardrobe}
+    looks = []
+    for look in capsule.plan.looks:
+        tiles = []
+        for piece in look.pieces:
+            if piece.owned in owned:
+                item = owned[piece.owned]
+                tiles.append(BoardTile(description=item.description, image_url=item.thumbnail, owned=True))
+            elif piece.new in capsule.picks:
+                card = _small_card(capsule.picks[piece.new])
+                tiles.append(BoardTile(description=card.name, image_url=card.image_url))
+            elif capsule.guided and (new := capsule.new_piece(piece.new or "")) and new.key not in capsule.skipped:
+                tiles.append(BoardTile(description=new.category, pending=True, current=new.key == capsule.current))
+        looks.append(LookView(title=look.title, why=look.why, tiles=tiles,
+                              product_ids=[p.id for p in capsule.look_products(look)]))
+    used = dict.fromkeys(piece.owned for look in capsule.plan.looks for piece in look.pieces if piece.owned in owned)
+    packed = [BoardTile(description=owned[i].description, image_url=owned[i].thumbnail, owned=True) for i in used]
+    left = [BoardTile(description=owned[x.owned].description, image_url=owned[x.owned].thumbnail, owned=True,
+                      why=x.why) for x in capsule.plan.leave_at_home if x.owned in owned]
+    worn = [piece.new for look in capsule.plan.looks for piece in look.pieces if piece.new]
+    new_pieces = [NewPieceView(key=p.key, category=p.category, why=p.why, looks=worn.count(p.key),
+                               product=_small_card(capsule.picks[p.key]) if p.key in capsule.picks else None,
+                               current=p.key == capsule.current, skipped=p.key in capsule.skipped)
+                  for p in capsule.plan.new_pieces]
+    total = sum(p.price or 0 for p in capsule.products_to_buy())
+    return CapsuleView(occasion=capsule.plan.occasion, looks=looks, packed=packed, leave_at_home=left,
+                       new_pieces=new_pieces,
+                       total=round(total, 2), budget=capsule.budget, guided=capsule.guided)
 
 
 def _small_card(product: Product) -> SmallProductCard:
