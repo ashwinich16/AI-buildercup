@@ -91,7 +91,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     # An empty search matches any catalog; nothing here depends on what the shop sells.
     warm_calls = [catalog.categories, catalog.product_types,
                   lambda: catalog.search(SearchQuery(text="", limit=1)),
-                  lambda: speech.synthesize("Hi")]
+                  lambda: speech.synthesize("Hi"),
+                  root.recommender.prepare]   # what goes with what, so adding to the cart never waits on it
 
     @asynccontextmanager
     async def lifespan(_: FastAPI):

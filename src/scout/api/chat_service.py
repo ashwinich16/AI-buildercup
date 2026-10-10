@@ -88,6 +88,10 @@ class ScreenState(BaseModel):
     focus_product_id: Optional[str] = None
     cart: CartView = Field(default_factory=CartView)
     suggestion: Optional[SmallProductCard] = None
+    suggestions: list[SmallProductCard] = Field(default_factory=list)   # the few options shown in the pop-up
+    # The product Scout is describing when it is not one of the cards above (e.g. the suggested item):
+    # shown large at the top of the page, so the shopper sees what Scout is talking about.
+    spotlight: Optional[ProductCard] = None
     outfit: Optional[OutfitView] = None
 
 
@@ -254,7 +258,8 @@ _FORMATTING = re.compile(r"[*#`_>]+|^[ \t]*[-•][ \t]+", re.MULTILINE)
 
 def _spoken_cart(cart: Cart, named: int = 2) -> str:
     """The cart in a few words: the first items by a short name, then how many more."""
-    names = [" ".join(item.name.split()[:6]) for item in cart.items[:named]]
+    # By kind ("the jeans"), not the long catalogue title read aloud ("Jeans Men Stretch Slim Fit Straight").
+    names = [f"the {item.kind}" if item.kind else " ".join(item.name.split()[:6]) for item in cart.items[:named]]
     others = len(cart.items) - len(names)
     if others:
         names.append(f"{others} more {'item' if others == 1 else 'items'}")
@@ -263,9 +268,9 @@ def _spoken_cart(cart: Cart, named: int = 2) -> str:
 
 def _screen_from_state(state: dict) -> ScreenState:
     need = state_keys.need(state)
-    cards = []
-    for position, product in enumerate(state_keys.presented(state), start=1):
-        cards.append(ProductCard(
+
+    def card(product: Product, position: int) -> ProductCard:
+        return ProductCard(
             id=product.id,
             position=position,
             name=_card_name(product),
@@ -277,11 +282,22 @@ def _screen_from_state(state: dict) -> ScreenState:
             exact_match=state_keys.is_exact(state, product.id),
             evidence=[EvidenceView(quote=e.quote, count=e.count_text(), heads_up=e.sentiment == "negative")
                       for e in _EVIDENCE.pick(product, need)],
-        ))
+        )
+
+    presented = state_keys.presented(state)
+    cards = [card(product, position) for position, product in enumerate(presented, start=1)]
+    focus = state_keys.focus(state)
+    # Only while they are asking about it: after, say, adding it to the cart, it should not linger on screen.
+    turn = read_turn(state)
+    describing = turn is not None and turn.intent == "ask_about_product"
+    spotlight = card(focus, 0) if describing and focus and focus.id not in {p.id for p in presented} else None
     cart = state_keys.cart(state)
     return ScreenState(products=cards, focus_product_id=state.get(state_keys.FOCUS_PRODUCT),
                        cart=CartView(items=cart.items, total=cart.total),
-                       suggestion=_suggestion_card(state), outfit=_outfit_view(state))
+                       suggestion=_suggestion_card(state), outfit=_outfit_view(state), spotlight=spotlight,
+                       suggestions=[_small_card(s.product).model_copy(update={"goes_with": s.goes_with,
+                                                                               "reasons": s.reasons})
+                                    for s in state_keys.suggestions(state)])
 
 
 def _suggestion_card(state: dict) -> Optional[SmallProductCard]:

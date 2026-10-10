@@ -35,6 +35,7 @@ RECENT_TURNS = "recent_turns"        # the last few exchanges, word for word: [{
 # Cart and preferences
 CART_EVENT = "cart_event"            # what just happened to the cart, for Narration to speak
 SUGGESTION = "suggestion"            # one item that goes with the cart (Recommender), or None
+SUGGESTIONS = "suggestions"          # the few options shown with it (the first is SUGGESTION), best first
 SUGGESTED_IDS = "suggested_ids"      # every product suggested this conversation: never suggest one twice
 SUGGESTED_KINDS = "suggested_kinds"  # kinds already suggested: never offer the same kind twice
 OFFER_OPEN = "offer_open"            # Scout offered the suggestion in its LAST reply, so a plain "yes" answers it
@@ -94,10 +95,25 @@ def is_exact(state, product_id: str) -> bool:
     return not state.get(RELAXED) or product_id in set(state.get(EXACT_MATCHES) or [])
 
 
-def suggestion(state) -> Optional[Suggestion]:
-    """The item Scout suggested to go with the cart, if one is open."""
+def suggestion(state, position: Optional[int] = None) -> Optional[Suggestion]:
+    """The item Scout suggested to go with the cart, if one is open; `position` picks one of the options
+    shown with it (1 = the first)."""
     raw = state.get(SUGGESTION)
-    return Suggestion.model_validate(raw) if raw else None
+    if not raw:
+        return None
+    if position:
+        options = suggestions(state)
+        if 1 <= position <= len(options):
+            return options[position - 1]
+    return Suggestion.model_validate(raw)
+
+
+def suggestions(state) -> list[Suggestion]:
+    """The options shown with the open suggestion (empty when none is open)."""
+    if not state.get(SUGGESTION):
+        return []
+    return [Suggestion.model_validate(raw) for raw in state.get(SUGGESTIONS) or []] or \
+        [Suggestion.model_validate(state.get(SUGGESTION))]
 
 
 def outfit(state) -> Optional[Outfit]:

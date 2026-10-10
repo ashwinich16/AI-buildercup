@@ -4,7 +4,7 @@ import { Orb, scoutState } from "./ScoutStage.jsx";
 
 // Typing is the alternative to talking (the orb above is the microphone). On a phone the big orb
 // scrolls away below the products, so this bar, pinned to the bottom, carries a small orb too.
-export default function Composer({ speaking, busy, paused, ready, voiceInput, onToggleListening, onSend, onStopSpeaking }) {
+export default function Composer({ speaking, busy, paused, ready, voiceInput, heard = "", onToggleListening, onSend, onStopSpeaking }) {
   const state = scoutState({ ready, voiceInput, busy, speaking, paused });
   const [text, setText] = useState("");
 
@@ -26,7 +26,7 @@ export default function Composer({ speaking, busy, paused, ready, voiceInput, on
           onToggle={onToggleListening}
           small
         />
-        <p className="composer__status">{voiceInput.interim ? `“${voiceInput.interim}”` : state.status}</p>
+        <p className="composer__status">{heard ? `“${heard}”` : state.status}</p>
       </div>
       {speaking && (
         <button className="button button--secondary composer__stop" type="button" onClick={onStopSpeaking}>

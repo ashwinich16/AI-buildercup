@@ -90,6 +90,23 @@ class GeminiPairingAdvisor(PairingAdvisor):
         )
         self._known: dict[str, list[str]] = {}
 
+    def prepare(self, shop_kinds: list[str]) -> None:
+        """Ask about every kind the shop has, all at once, so adding to the cart never waits for Gemini
+        (one call took about 9 seconds when made at add-to-cart time)."""
+        missing = [k for k in shop_kinds if k not in self._known]
+        if not missing:
+            return
+
+        def ask(kind: str) -> None:
+            try:
+                self.kinds_that_go_with(kind, shop_kinds)
+            except Exception as error:   # one kind failing must not stop the others
+                logger.warning("Could not prepare pairings for %s: %s", kind, error)
+
+        with ThreadPoolExecutor(max_workers=8) as pool:
+            list(pool.map(ask, missing))
+        logger.info("Prepared pairings for %d kinds.", len(self._known))
+
     def kinds_that_go_with(self, kind: str, shop_kinds: list[str]) -> list[str]:
         if kind not in self._known:
             prompt = PAIRING_PROMPT.format(kind=kind, shop_kinds=", ".join(shop_kinds))
@@ -112,10 +129,23 @@ class Recommender:
         self._limit = candidates_per_kind
         self._products: dict[str, Product] = {}      # cart products by id, kept for the process
 
+    def prepare(self) -> None:
+        """Work out what goes with every kind in the shop ahead of time (called at server start-up)."""
+        prepare = getattr(self._advisor, "prepare", None)
+        if prepare:
+            prepare(self._catalog.product_types())
+
     def for_new_item(self, added: Product, cart: Cart, rules: SuggestionRules) -> Optional[Suggestion]:
         """The best item to go with a product just added to the cart."""
+        options = self.options_for_new_item(added, cart, rules, limit=1)
+        return options[0] if options else None
+
+    def options_for_new_item(self, added: Product, cart: Cart, rules: SuggestionRules,
+                             limit: int = 4) -> list[Suggestion]:
+        """A few items that go with a product just added, best first and of different kinds where possible
+        (a belt, a t-shirt, sneakers), so the shopper can pick rather than take or leave one."""
         self._products[added.id] = added
-        return self._best([added], cart, rules)
+        return self._ranked([added], cart, rules, limit)
 
     def for_cart(self, cart: Cart, rules: SuggestionRules) -> Optional[Suggestion]:
         """At checkout: anything that would complete the cart as a whole ("you might have forgotten...")."""
@@ -123,6 +153,10 @@ class Recommender:
         return self._best(anchors, cart, rules)
 
     def _best(self, anchors: list[Product], cart: Cart, rules: SuggestionRules) -> Optional[Suggestion]:
+        ranked = self._ranked(anchors, cart, rules, limit=1)
+        return ranked[0] if ranked else None
+
+    def _ranked(self, anchors: list[Product], cart: Cart, rules: SuggestionRules, limit: int) -> list[Suggestion]:
         skip_ids = {item.product_id for item in cart.items} | rules.suggested_ids
         skip_kinds = {item.kind for item in cart.items if item.kind} | rules.suggested_kinds
         need = rules.need
@@ -132,20 +166,32 @@ class Recommender:
         plans = [(anchor, rank, kind) for anchor in anchors
                  for rank, kind in enumerate(k for k in self._kinds_for(anchor) if k not in skip_kinds)]
         if not plans:
-            return None
+            return []
         with ThreadPoolExecutor(max_workers=min(len(plans), 8)) as pool:
             found = list(pool.map(lambda plan: self._candidates(plan[0], plan[2], budget_left, need), plans))
 
-        best: Optional[tuple[float, Suggestion]] = None
+        scored: list[tuple[float, Suggestion]] = []
         for (anchor, rank, _kind), candidates in zip(plans, found):
             for candidate in candidates:
                 if candidate.id in skip_ids or any(has_all(candidate, [term]) for term in rules.avoid if term):
                     continue
                 score, reasons = _score(anchor, candidate)
                 score -= 0.6 * rank                # the most essential kinds first
-                if best is None or score > best[0]:
-                    best = (score, Suggestion(product=candidate, goes_with=anchor.kind or "item", reasons=reasons))
-        return best[1] if best else None
+                scored.append((score, Suggestion(product=candidate, goes_with=anchor.kind or "item", reasons=reasons)))
+        scored.sort(key=lambda item: item[0], reverse=True)
+
+        # Best of each kind first (variety: a belt, a t-shirt, sneakers), then the next best of any kind.
+        chosen: list[Suggestion] = []
+        kinds_taken: set[str] = set()
+        for _score_value, suggestion in scored:
+            if len(chosen) < limit and suggestion.product.kind not in kinds_taken \
+                    and all(s.product.id != suggestion.product.id for s in chosen):
+                chosen.append(suggestion)
+                kinds_taken.add(suggestion.product.kind)
+        for _score_value, suggestion in scored:
+            if len(chosen) < limit and all(s.product.id != suggestion.product.id for s in chosen):
+                chosen.append(suggestion)
+        return chosen
 
     def _kinds_for(self, anchor: Product) -> list[str]:
         kind = anchor.kind

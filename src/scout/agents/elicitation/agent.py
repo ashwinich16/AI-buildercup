@@ -81,6 +81,9 @@ class TurnUnderstanding(BaseModel):
     about_suggestion: bool = Field(
         default=False, description="True when the product they mean is the ITEM SCOUT SUGGESTED to go with "
                                    "their cart, not one of the presented options")
+    suggestion_position: Optional[int] = Field(
+        default=None, description="When about_suggestion: the number of the suggested item they mean (1 is the "
+                                  "first); null if it is the first or not clear")
     outfit_action: Optional[Literal["start", "skip", "add_extra", "finish", "add_to_cart", "leave"]] = Field(
         default=None, description="For outfit: start a new one, skip the piece being chosen, accept the extra piece "
                                   "Scout offered, finish without more pieces, put the whole outfit in the cart, or "
@@ -133,7 +136,7 @@ WHAT YOU KNOW ABOUT THIS SHOPPER (from earlier conversations)
 THEIR CART
 {cart}
 
-ITEM SCOUT SUGGESTED TO GO WITH THEIR CART
+ITEMS SCOUT SUGGESTED TO GO WITH THEIR CART (shown on screen; Scout named the first)
 {suggestion}
 
 OUTFIT YOU ARE PUTTING TOGETHER WITH THEM
@@ -148,7 +151,7 @@ FOR THE SHOPPER'S NEW MESSAGE
    - compare: they want two or more presented products compared.
    - choose: they have decided on a product they want to buy.
    - cart: they want to hear what is in their cart, take one or more things out of it, empty it, or finish and pay.
-   - The ITEM SCOUT SUGGESTED (above, if any) is a product they can act on just like the presented ones. When the product they mean is that item, set about_suggestion true, keep the need unchanged, ready_to_search false, no question, and pick the intent by what they want to do with it:
+   - The ITEMS SCOUT SUGGESTED (above, if any) are products they can act on just like the presented ones. When the product they mean is one of those items, set about_suggestion true and suggestion_position to its number (by number, kind, colour or name), keep the need unchanged, ready_to_search false, no question, and pick the intent by what they want to do with it:
        choose: have it added to the cart. If Scout offered it in its last reply, a plain yes means choose.
        ask_about_product: a question about it, or to hear it described.
        see_suggestion: to see other items like it.
@@ -448,13 +451,12 @@ def read_turn(state) -> Optional[TurnUnderstanding]:
 
 
 def _suggestion_text(state) -> str:
-    suggestion = state_keys.suggestion(state)
-    if suggestion is None:
+    options = state_keys.suggestions(state)
+    if not options:
         return "none"
-    product = suggestion.product
-    offered = " Scout offered it in its last reply." if state.get(state_keys.OFFER_OPEN) else ""
-    return (f"{' '.join(product.title.split()[:10])} (a {product.kind}, "
-            f"goes with their {suggestion.goes_with}).{offered}")
+    offered = "\nScout offered the first one in its last reply." if state.get(state_keys.OFFER_OPEN) else ""
+    return "\n".join(f"{n}. {' '.join(s.product.title.split()[:10])} (a {s.product.kind}, goes with their {s.goes_with})"
+                     for n, s in enumerate(options, start=1)) + offered
 
 
 def _outfit_text(state) -> str:

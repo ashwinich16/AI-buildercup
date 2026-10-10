@@ -264,9 +264,14 @@ class NarrationAgentBuilder:
         offer = ""
         if suggestion and event.get("action") == "added":   # only right after adding, never when removing
             offer = f"\nSUGGESTION (one item that goes with what they just added)\n{suggestion.to_prompt_text()}\n"
+        # The cart below already lists a just-added item, so say plainly that it is new, or the reply can
+        # read it as "already there".
+        said = {"added": "They asked for it and you have JUST ADDED it; it was not in the cart before.",
+                "already_in_cart": "It was ALREADY in the cart before they asked; nothing was added."}
+        plain = said.get(event.get("action"), "")
         return CART_UPDATE.format(
             voice=VOICE,
-            event=json.dumps(event, ensure_ascii=False),
+            event=json.dumps(event, ensure_ascii=False) + (f"\n{plain}" if plain else ""),
             cart=state_keys.cart(state).to_prompt_text(),
             suggestion=offer,
         )

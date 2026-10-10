@@ -7,16 +7,20 @@ import Header from "./components/Header.jsx";
 import ScoutStage from "./components/ScoutStage.jsx";
 import Composer from "./components/Composer.jsx";
 import ProductList from "./components/ProductList.jsx";
-import PairsWith from "./components/PairsWith.jsx";
+import Spotlight from "./components/Spotlight.jsx";
+import SuggestionsPopup from "./components/SuggestionsPopup.jsx";
 import OutfitStrip from "./components/OutfitStrip.jsx";
 import TryOnSheet from "./components/TryOnSheet.jsx";
 import CartSheet from "./components/CartSheet.jsx";
 import SettingsSheet from "./components/SettingsSheet.jsx";
 
-const EMPTY_SCREEN = { products: [], cart: { items: [], total: 0 }, focus_product_id: null, suggestion: null, outfit: null };
+const EMPTY_SCREEN = {
+  products: [], cart: { items: [], total: 0 }, focus_product_id: null, suggestion: null, suggestions: [], outfit: null,
+  spotlight: null,
+};
 // What to show, from any API response that carries it (session start, streamed screen, end of turn).
-const screenOf = ({ products, cart, focus_product_id, suggestion, outfit }) => ({
-  products, cart, focus_product_id, suggestion, outfit,
+const screenOf = ({ products, cart, focus_product_id, suggestion, suggestions, outfit, spotlight }) => ({
+  products, cart, focus_product_id, suggestion, suggestions: suggestions || [], outfit, spotlight,
 });
 const DEFAULT_SETTINGS = {
   voice: true, rate: 1, language: "en-IN", highContrast: false, largeText: false, headphones: false,
@@ -52,6 +56,8 @@ export default function App() {
   const [assistantWidth, setAssistantWidth] = useState(DEFAULT_ASSISTANT_WIDTH); // the Scout panel, in pixels
   const [categories, setCategories] = useState([]);
   const [tryOn, setTryOn] = useState(null); // what to try on: { productIds, label }, or null
+  // The "You might also like" pop-up opens once for each new set of suggestions (e.g. after adding to cart).
+  const [dismissedSuggestions, setDismissedSuggestions] = useState("");
   const [photo, setPhoto] = useState(null); // the shopper's photo for try-on, kept only while the page is open // what the shop sells, offered as first things to ask for
 
   const speaker = useSpeaker();
@@ -194,6 +200,13 @@ export default function App() {
   });
   const voiceInputRef = useRef(voiceInput);
   voiceInputRef.current = voiceInput;
+
+  // What to show as "you said" while listening: the same judgement as for sending, so Scout's own voice
+  // coming back through the speakers is never displayed as the shopper's words.
+  const heard = voiceInput.interim;
+  const audibleNow = speaker.speaking ? "playing" : audibleAt(Date.now());
+  const shownHeard =
+    !heard ? "" : audibleNow === "playing" ? (isInterruption(heard) ? heard : "") : audibleNow === "tail" && isEcho(heard) ? "" : heard;
   listeningRef.current = voiceInput.active;
 
   const startShopping = async (signedIn) => {
@@ -259,7 +272,8 @@ export default function App() {
 
   if (!shopper) return <SignIn onSignedIn={startShopping} />;
 
-  const hasProducts = screen.products.length > 0 || Boolean(screen.outfit);   // something to show beside Scout
+  const suggestionsKey = (screen.suggestions || []).map((item) => item.id).join(",");
+  const hasProducts = screen.products.length > 0 || Boolean(screen.outfit) || Boolean(screen.spotlight);
 
   return (
     <div className="app">
@@ -286,6 +300,17 @@ export default function App() {
       >
         {hasProducts && (
           <section className="layout__shop" aria-label="Options">
+            <Spotlight
+              product={screen.spotlight}
+              speaking={speaker.speaking}
+              busy={busy}
+              addPhrase={
+                screen.spotlight && screen.suggestion && screen.spotlight.id === screen.suggestion.id
+                  ? `Add the suggested ${screen.suggestion.kind || "item"} to my cart`
+                  : null
+              }
+              onAsk={send}
+            />
             <OutfitStrip outfit={screen.outfit} busy={busy} onAsk={send} onTryOn={setTryOn} />
             <ProductList
               products={screen.products}
@@ -295,7 +320,6 @@ export default function App() {
               onAsk={send}
               onTryOn={setTryOn}
             />
-            <PairsWith suggestion={screen.suggestion} busy={busy} onAsk={send} />
           </section>
         )}
         {hasProducts && <PanelResizer width={assistantWidth} onResize={setAssistantWidth} />}
@@ -308,6 +332,7 @@ export default function App() {
             paused={paused}
             ready={Boolean(sessionId)}
             voiceInput={voiceInput}
+            heard={shownHeard}
             empty={!hasProducts}
             starters={categories}
             onToggleListening={toggleListening}
@@ -319,6 +344,7 @@ export default function App() {
             paused={paused}
             ready={Boolean(sessionId)}
             voiceInput={voiceInput}
+            heard={shownHeard}
             onToggleListening={toggleListening}
             onSend={send}
             onStopSpeaking={() => {
@@ -329,6 +355,13 @@ export default function App() {
         </aside>
       </main>
 
+      <SuggestionsPopup
+        suggestions={screen.suggestions}
+        open={suggestionsKey !== "" && suggestionsKey !== dismissedSuggestions && openSheet === null}
+        onClose={() => setDismissedSuggestions(suggestionsKey)}
+        busy={busy}
+        onAsk={send}
+      />
       <CartSheet
         open={openSheet === "cart"}
         onClose={() => setOpenSheet(null)}

@@ -93,15 +93,20 @@ class ScoutOrchestrator(BaseAgent):
         )
 
     async def _run_async_impl(self, ctx: InvocationContext) -> AsyncGenerator[Event, None]:
-        # 0. Ground the questions in what the shop really has.
-        if self._still_working_out_need(ctx):
+        # 0. Ground the questions in what the shop really has (not needed for a command understood in code).
+        if self._still_working_out_need(ctx) and self._fast_turn(ctx) is None:
             overview = await self._catalog_overview(ctx)
             if overview:
                 yield self._update_state(ctx, {state_keys.CATALOG_OVERVIEW: overview})
 
-        # 1. Understand the message (its JSON is data, never spoken).
-        async for event in self._silently(self.elicitation, ctx):
-            yield event
+        # 1. Understand the message (its JSON is data, never spoken). Button presses and short, clear commands
+        #    ("add the first one") are understood in code: the model step takes seconds and adds nothing there.
+        fast = self._fast_turn(ctx)
+        if fast is not None:
+            yield self._update_state(ctx, {state_keys.TURN: fast.model_dump()})
+        else:
+            async for event in self._silently(self.elicitation, ctx):
+                yield event
 
         turn = read_turn(ctx.session.state)
         if ctx.session.state.get(state_keys.OFFER_OPEN):   # the offer was answered (or passed over) just now
@@ -133,7 +138,8 @@ class ScoutOrchestrator(BaseAgent):
                 yield event
 
     async def _route(self, ctx: InvocationContext, turn: TurnUnderstanding):
-        suggestion = state_keys.suggestion(ctx.session.state) if turn.about_suggestion else None
+        suggestion = (state_keys.suggestion(ctx.session.state, turn.suggestion_position)
+                      if turn.about_suggestion else None)
         if suggestion is not None and turn.intent in ("choose", "ask_about_product", "reject"):
             # They mean the item Scout suggested, not one on screen.
             if turn.intent == "choose":
@@ -317,9 +323,15 @@ class ScoutOrchestrator(BaseAgent):
         }
         suggestion = None
         if added and suggested is None:   # one thing that goes with it; never a chain of suggestions
-            suggestion = await asyncio.to_thread(self.recommender.for_new_item, product, cart,
-                                                 self._suggestion_rules(ctx))
+            options = await asyncio.to_thread(self.recommender.options_for_new_item, product, cart,
+                                              self._suggestion_rules(ctx))
+            suggestion = options[0] if options else None   # Scout names the best; the screen shows them all
             delta.update(self._offer(ctx, suggestion, at_checkout=False))
+            if options:
+                delta[state_keys.SUGGESTIONS] = [option.model_dump() for option in options]
+                # every option shown counts as suggested, so none of them comes back later
+                delta[state_keys.SUGGESTED_IDS] = list(dict.fromkeys(
+                    list(delta.get(state_keys.SUGGESTED_IDS) or []) + [o.product.id for o in options]))
         yield self._update_state(ctx, delta)
         async for event in self._narrate_offer(ctx, suggestion):
             yield event
@@ -527,6 +539,7 @@ class ScoutOrchestrator(BaseAgent):
         state = ctx.session.state
         return {
             state_keys.SUGGESTION: suggestion.model_dump(),
+            state_keys.SUGGESTIONS: [suggestion.model_dump()],   # replaced by the full list when there is one
             state_keys.SUGGESTED_IDS: list(state.get(state_keys.SUGGESTED_IDS) or []) + [suggestion.product.id],
             state_keys.SUGGESTED_KINDS: list(state.get(state_keys.SUGGESTED_KINDS) or []) + [suggestion.product.kind],
             state_keys.OFFER_AT_CHECKOUT: at_checkout,
@@ -542,6 +555,45 @@ class ScoutOrchestrator(BaseAgent):
     # -----------------------------------------------------------------
     # Helpers
     # -----------------------------------------------------------------
+
+    def _fast_turn(self, ctx: InvocationContext) -> Optional[TurnUnderstanding]:
+        """The turn, when the message is a button press or a short, unambiguous command; else None.
+
+        Only exact, simple forms: "Add option 2 to my cart", "add the first one", "describe the second one",
+        the suggestion buttons, "Show me more options", "Compare these". Anything else, or anything that
+        does not fit what is on screen, goes to the Elicitation model as before.
+        """
+        state = ctx.session.state
+        text = re.sub(r"[.!?\s]+$", "", content_text(ctx.user_content, separator=" ").strip().lower()).replace("’", "'")
+        if not text:
+            return None
+        need = ShoppingNeed.model_validate(state.get(state_keys.NEED) or {})
+        presented = len(state.get(state_keys.PRESENTED) or [])
+        base = {"need": need, "ready_to_search": False, "understood": text}
+
+        for pattern, intent in _FAST_POSITIONAL:
+            match = pattern.match(text)
+            if match:
+                position = _position(match.group("n") or match.group("m"))
+                if position and position <= presented:
+                    return TurnUnderstanding(intent=intent, product_position=position, **base)
+                return None
+        if state.get(state_keys.SUGGESTION):
+            numbered = _FAST_SUGGESTION_N.match(text)
+            if numbered:
+                n = int(numbered.group("n"))
+                if 1 <= n <= len(state_keys.suggestions(state)):
+                    intent = "choose" if numbered.group("verb") == "add" else "ask_about_product"
+                    return TurnUnderstanding(intent=intent, about_suggestion=True, suggestion_position=n, **base)
+            if _FAST_ADD_SUGGESTED.match(text):
+                return TurnUnderstanding(intent="choose", about_suggestion=True, **base)
+            if _FAST_SIMILAR_TO_SUGGESTED.match(text):
+                return TurnUnderstanding(intent="see_suggestion", about_suggestion=True, **base)
+        if presented and _FAST_MORE.match(text):
+            return TurnUnderstanding(intent="more_options", **base)
+        if presented > 1 and _FAST_COMPARE.match(text):
+            return TurnUnderstanding(intent="compare", **base)
+        return None
 
     def _presented_product(self, ctx: InvocationContext, position: Optional[int]) -> Optional[Product]:
         return self.resolver.resolve(position, state_keys.presented(ctx.session.state))
@@ -597,3 +649,28 @@ class ScoutOrchestrator(BaseAgent):
             actions=EventActions(state_delta=state_delta),
         )
 
+
+# Commands understood in code (see ScoutOrchestrator._fast_turn). Strict on purpose: anything less clear
+# goes to the Elicitation model.
+def _ordinal(name: str) -> str:
+    return rf"(?P<{name}>first|second|third|fourth|1st|2nd|3rd|4th|one|two|three|four|[1-4])"
+_FAST_POSITIONAL = [
+    (re.compile(rf"^(please )?(add|put) (option {_ordinal('n')}|(the )?{_ordinal('m')}( one)?)( (to|in|into) (my|the) cart)?( please)?$"),
+     "choose"),
+    (re.compile(rf"^(describe option {_ordinal('n')} in detail|(please )?(tell me (more )?about|describe) (the )?{_ordinal('m')}"
+                rf"( one| option)?( in detail)?( please)?)$"),
+     "ask_about_product"),
+]
+_FAST_SUGGESTION_N = re.compile(r"^(?P<verb>add|tell me about) suggestion (?P<n>[1-9])( to my cart)?$")
+_FAST_ADD_SUGGESTED = re.compile(r"^add the suggested [a-z' -]+ to my cart$")
+_FAST_SIMILAR_TO_SUGGESTED = re.compile(r"^show me other options like the suggested [a-z' -]+$")
+_FAST_MORE = re.compile(r"^(show me )?more options( please)?$")
+_FAST_COMPARE = re.compile(r"^compare (these|them)( for me)?( please)?$")
+_ORDINALS = {"first": 1, "1st": 1, "one": 1, "second": 2, "2nd": 2, "two": 2,
+             "third": 3, "3rd": 3, "three": 3, "fourth": 4, "4th": 4, "four": 4}
+
+
+def _position(word: Optional[str]) -> Optional[int]:
+    if not word:
+        return None
+    return int(word) if word.isdigit() else _ORDINALS.get(word)

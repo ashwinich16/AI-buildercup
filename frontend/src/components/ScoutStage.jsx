@@ -50,7 +50,7 @@ export function Orb({ state, active, ready, supported, onToggle, small = false }
 }
 
 // `starters`: the shop's categories, so a new shopper can start with one press (they can also just talk).
-export default function ScoutStage({ messages, busy, speaking, paused, ready, voiceInput, empty, starters = [], onToggleListening, onAsk }) {
+export default function ScoutStage({ messages, busy, speaking, paused, ready, voiceInput, heard = "", empty, starters = [], onToggleListening, onAsk }) {
   const state = scoutState({ ready, voiceInput, busy, speaking, paused });
   const [historyOpen, setHistoryOpen] = useState(false);
 
@@ -58,7 +58,7 @@ export default function ScoutStage({ messages, busy, speaking, paused, ready, vo
   const lastScout = [...messages].reverse().find((m) => m.role === "scout");
   const lastShopper = [...messages].reverse().find((m) => m.role === "shopper");
   const waiting = busy && last?.role === "shopper";        // Scout hasn't started its reply yet
-  const youSaid = voiceInput.interim || lastShopper?.text;
+  const youSaid = heard || lastShopper?.text;
 
   // Keep the newest words of a long reply in view while it streams in.
   const captionRef = useRef(null);
@@ -85,7 +85,7 @@ export default function ScoutStage({ messages, busy, speaking, paused, ready, vo
 
       <div className="stage__caption" ref={captionRef}>
         {youSaid && (
-          <p className={`stage__you ${voiceInput.interim ? "is-live" : ""}`}>
+          <p className={`stage__you ${heard ? "is-live" : ""}`}>
             <span className="visually-hidden">You said: </span>“{youSaid}”
           </p>
         )}
