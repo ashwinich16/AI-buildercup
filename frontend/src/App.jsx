@@ -23,6 +23,7 @@ const EMPTY_SCREEN = {
 };
 // What to show, from any API response that carries it (session start, streamed screen, end of turn).
 // The wardrobe is left out of mid-turn updates (it carries photos), so the last one shown is kept then.
+const suggestionsKeyOf = (suggestions) => (suggestions || []).map((item) => item.id).join(",");
 const screenOf = (
   { products, cart, focus_product_id, suggestion, suggestions, capsule, planning_outfit, wardrobe, spotlight }, current = EMPTY_SCREEN,
 ) => ({
@@ -259,6 +260,7 @@ export default function App() {
       setShopper({ ...signedIn, name: started.shopper_name || signedIn.name });
       setSessionId(started.session_id);
       setScreen(screenOf(started));
+      setDismissedSuggestions(suggestionsKeyOf(started.suggestions)); // pop up only after adding, not on resume
       setCategories(started.categories || []);
       // Carrying on their last conversation: what was said is shown again, as they left it.
       setMessages((started.history || []).map((m) => message(m.role, m.text)));
@@ -297,6 +299,7 @@ export default function App() {
       sessionRef.current = started.session_id;
       setSessionId(started.session_id);
       setScreen(screenOf(started));
+      setDismissedSuggestions(suggestionsKeyOf(started.suggestions)); // pop up only after adding, not on resume
       scoutSays(started.greeting);
     } catch (error) {
       scoutSays(`I couldn't start a new conversation: ${error.message}`);
@@ -339,7 +342,11 @@ export default function App() {
 
   if (!shopper) return <SignIn onSignedIn={startShopping} />;
 
-  const suggestionsKey = (screen.suggestions || []).map((item) => item.id).join(",");
+  const suggestionsKey = suggestionsKeyOf(screen.suggestions);
+  // 1-based number of the suggestion being described, or 0 when the spotlight is something else
+  const spotlightSuggestion = screen.spotlight
+    ? (screen.suggestions || []).findIndex((item) => item.id === screen.spotlight.id) + 1
+    : 0;
   const hasProducts = screen.products.length > 0 || Boolean(screen.capsule) || Boolean(screen.spotlight);   // something to show beside Scout
 
   return (
@@ -373,11 +380,7 @@ export default function App() {
               product={screen.spotlight}
               speaking={speaker.speaking}
               busy={busy}
-              addPhrase={
-                screen.spotlight && screen.suggestion && screen.spotlight.id === screen.suggestion.id
-                  ? `Add the suggested ${screen.suggestion.kind || "item"} to my cart`
-                  : null
-              }
+              addPhrase={spotlightSuggestion > 0 ? `Add suggestion ${spotlightSuggestion} to my cart` : null}
               onAsk={send}
             />
             <CapsuleBoard
