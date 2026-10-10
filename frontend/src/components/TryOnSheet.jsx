@@ -18,7 +18,7 @@ export default function TryOnSheet({ request, sessionId, photo, onPhoto, onClose
     setResult(null);
     setStatus(`Putting the ${request.label} on your photo. This takes a few seconds…`);
     api
-      .tryOn(sessionId, request.productIds, photo)
+      .tryOn(sessionId, request, photo)
       .then((blob) => {
         if (cancelled) return;
         url = URL.createObjectURL(blob);

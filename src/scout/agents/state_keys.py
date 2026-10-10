@@ -44,6 +44,8 @@ OFFER_AT_CHECKOUT = "offer_at_checkout"  # that offer came at checkout: declinin
 CHECKOUT_REMINDED = "checkout_reminded"  # the one reminder before checkout was already given
 
 # Planning outfits for any occasion (a trip, a week, a day at the office...)
+MODE = "mode"                        # "outfit" while planning an outfit, until it is finished or they leave it
+OUTFIT_MODE = "outfit"
 STYLIST_PLAN = "stylist_plan"        # the Stylist agent's latest CapsulePlan
 CAPSULE = "capsule"                  # the plan on the board (looks + the products chosen for new pieces), or None
 OUTFIT_REQUESTED = "outfit_requested"  # asked for, waiting on one question (whose style): True or None
@@ -133,3 +135,8 @@ def recent_turns_text(state) -> str:
         reply = " ".join(turn.get("scout", "").split())[:SCOUT_WORDS_SHOWN]
         lines += [f"Shopper: {turn.get('shopper', '')}", f"Scout: {reply}"]
     return "\n".join(lines) or "This is the start of the conversation."
+
+
+def planning_outfit(state) -> bool:
+    """In outfit mode: every request is for the outfit until it is finished or they ask for regular shopping."""
+    return state.get(MODE) == OUTFIT_MODE

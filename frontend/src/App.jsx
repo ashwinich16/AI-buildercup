@@ -17,12 +17,15 @@ import CartSheet from "./components/CartSheet.jsx";
 import SettingsSheet from "./components/SettingsSheet.jsx";
 
 const EMPTY_SCREEN = {
-  products: [], cart: { items: [], total: 0 }, focus_product_id: null, suggestion: null, capsule: null, wardrobe: [],
+  products: [], cart: { items: [], total: 0 }, focus_product_id: null, suggestion: null, capsule: null,
+  planning_outfit: false, wardrobe: [],
 };
 // What to show, from any API response that carries it (session start, streamed screen, end of turn).
 // The wardrobe is left out of mid-turn updates (it carries photos), so the last one shown is kept then.
-const screenOf = ({ products, cart, focus_product_id, suggestion, capsule, wardrobe }, current = EMPTY_SCREEN) => ({
-  products, cart, focus_product_id, suggestion, capsule, wardrobe: wardrobe ?? current.wardrobe,
+const screenOf = (
+  { products, cart, focus_product_id, suggestion, capsule, planning_outfit, wardrobe }, current = EMPTY_SCREEN,
+) => ({
+  products, cart, focus_product_id, suggestion, capsule, planning_outfit, wardrobe: wardrobe ?? current.wardrobe,
 });
 const DEFAULT_SETTINGS = {
   voice: true, rate: 1, language: "en-IN", highContrast: false, largeText: false, headphones: false, moreTime: false,
@@ -57,7 +60,7 @@ export default function App() {
   const [spokenOption, setSpokenOption] = useState(null); // position of the option Scout is describing right now
   const [assistantWidth, setAssistantWidth] = useState(DEFAULT_ASSISTANT_WIDTH); // the Scout panel, in pixels
   const [categories, setCategories] = useState([]); // what the shop sells, offered as first things to ask for
-  const [tryOn, setTryOn] = useState(null); // what to try on: { productIds, label }, or null
+  const [tryOn, setTryOn] = useState(null); // what to try on: { productIds, wardrobeIds, label }, or null
   const [photo, setPhoto] = useState(null); // the shopper's photo for try-on, kept only while the page is open
   const [attachments, setAttachments] = useState([]); // clothes photos attached in the chat: { id, preview, status, note }
   const [choices, setChoices] = useState([]); // short answers to Scout's last question, to tap
@@ -387,6 +390,7 @@ export default function App() {
             starters={categories}
             choices={busy ? [] : choices}
             showHistory={resumedChat}
+            planningOutfit={screen.planning_outfit}
             onToggleListening={toggleListening}
             onAsk={send}
           />

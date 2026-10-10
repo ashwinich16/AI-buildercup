@@ -72,11 +72,18 @@ export const api = {
     return done;
   },
   // The shopper's photo ({ data: base64, mimeType }) wearing the products: resolves with a PNG blob.
-  tryOn: async (sessionId, productIds, photo) =>
+  // `request`: { productIds, wardrobeIds } — products from the shop, and pieces they own (for a planned look).
+  tryOn: async (sessionId, request, photo) =>
     (
       await request("/api/try-on", {
         method: "POST",
-        body: { session_id: sessionId, product_ids: productIds, photo: photo.data, mime_type: photo.mimeType },
+        body: {
+          session_id: sessionId,
+          product_ids: request.productIds || [],
+          wardrobe_ids: request.wardrobeIds || [],
+          photo: photo.data,
+          mime_type: photo.mimeType,
+        },
       })
     ).blob(),
   // Clothes they own, from a photo file: made small here (quick to send), then read by Scout.
@@ -98,7 +105,7 @@ export const api = {
 };
 
 const PHOTO_SIZE = 768;     // longest side of a wardrobe photo sent to be read: plenty for Gemini, quick to upload
-const THUMBNAIL_SIZE = 192; // longest side of the small picture kept to show the piece
+const THUMBNAIL_SIZE = 512; // longest side of the picture kept of the piece: shown on the board and tried on
 
 function loadImage(file) {
   return new Promise((resolve, reject) => {

@@ -99,16 +99,16 @@ class TurnUnderstanding(BaseModel):
     about_suggestion: bool = Field(
         default=False, description="True when the product they mean is the ITEM SCOUT SUGGESTED to go with "
                                    "their cart, not one of the presented options")
-    outfit_action: Optional[Literal["start", "swap", "skip", "add_to_cart", "leave"]] = Field(
+    outfit_action: Optional[Literal["start", "swap", "skip", "add", "add_to_cart", "leave"]] = Field(
         default=None, description="For outfit: plan (or re-plan) the looks, other products for one new piece, skip "
-                                  "the piece being chosen, put the new pieces in the cart, or leave planning for "
-                                  "regular shopping")
+                                  "the piece being chosen, add a piece to the outfit, put the new pieces in the "
+                                  "cart (the outfit is finished), or leave planning for regular shopping")
     activities: list[str] = Field(
         default_factory=list, max_length=8,
         description="For outfit start: what they will do or where they will go, as they said it (for a single "
                     "event, the event itself); empty only if it is not clear yet")
     swap_piece: Optional[str] = Field(
-        default=None, description="For swap: the category of the NEW PIECE they want changed")
+        default=None, description="For swap, skip or add: the catalog category of the piece they mean")
     swap_wish: Optional[str] = Field(
         default=None, description="For swap: what they want instead, in plain words a product description would "
                                   "use; null if they did not say")
@@ -169,6 +169,9 @@ CLOTHES THEY ALREADY OWN
 PIECES THEY JUST SHOWED YOU IN PHOTOS
 {just_added}
 
+HOW THEY ARE SHOPPING
+{mode}
+
 OUTFIT PLAN ON THE BOARD
 {outfit}
 
@@ -192,6 +195,8 @@ FOR THE SHOPPER'S NEW MESSAGE
          The stylist needs only the occasion and what they will do. Many occasions already say it (a day at the office, a job interview, a wedding, a dinner): then put that in activities and do not ask. Only when it is unclear what they will be doing (a trip, a holiday, a weekend away), ask just that, in one short question, and put two to five places or activities that fit it in choices. Never ask about anything else for a plan (not dates, pieces, kinds or colours).
        swap: they want a different product, or other options, for one of the NEW PIECES on the board. Put its category in swap_piece (the piece being chosen now, if they do not say) and what they want instead in swap_wish.
        skip: they do not want the piece being chosen now.
+       add: they want another kind of piece in the outfit (shoes, a bag...). Put its catalog category in swap_piece and what they want it to be like in swap_wish.
+     While they are planning an outfit (HOW THEY ARE SHOPPING), everything they ask for is for the outfit until they finish it or ask for regular shopping: another kind of product is add, a different option or price for a piece is swap, and pointing at clothes they own is start (plan again, using them). Never reply with a generic line while they are planning.
      While the plan says a piece is being chosen now, naming one of the presented options in any way (its number, colour, a detail) is choose: it goes into the outfit.
        add_to_cart: they want the new pieces put in their cart.
        leave: they want to stop planning and go back to regular shopping.
@@ -303,6 +308,8 @@ class ElicitationAgentBuilder:
             wardrobe=_wardrobe_text(state),
             just_added=_just_added_text(state),
             outfit=_outfit_text(state),
+            mode=("Planning an outfit (outfit mode)" if state_keys.planning_outfit(state)
+                  else "Regular shopping"),
             recent=state_keys.recent_turns_text(state),
         )
 

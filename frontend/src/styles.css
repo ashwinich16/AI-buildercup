@@ -1774,6 +1774,22 @@ button {
   background: var(--primary);
   color: var(--primary-ink);
 }
+.stage__mode {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: center;
+  gap: 4px 10px;
+  margin: 4px 0 0;
+  font-size: 0.88rem;
+}
+.stage__mode-label {
+  padding: 2px 10px;
+  border-radius: 980px;
+  background: var(--primary);
+  color: var(--primary-ink);
+  font-weight: 600;
+}
 .stage__choices {
   display: grid;
   justify-items: start;

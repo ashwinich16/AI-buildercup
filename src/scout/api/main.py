@@ -70,7 +70,8 @@ class SpeechRequest(BaseModel):
 
 class TryOnRequest(BaseModel):
     session_id: str
-    product_ids: list[str] = Field(min_length=1, max_length=4)   # one product, or the pieces of an outfit
+    product_ids: list[str] = Field(default_factory=list, max_length=4)   # one product, or an outfit's new pieces
+    wardrobe_ids: list[str] = Field(default_factory=list, max_length=4)  # their own pieces in that look
     photo: str                                                   # the shopper's photo, base64
     mime_type: str = Field(default="image/jpeg", pattern=r"^image/(jpeg|png)$")   # what the model accepts
 
@@ -79,7 +80,7 @@ class WardrobePhotoRequest(BaseModel):
     session_id: str
     photo: str                                   # the piece of clothing, base64
     mime_type: str = Field(default="image/jpeg", pattern=r"^image/(jpeg|png|webp)$")
-    thumbnail: str = Field(default="", max_length=200_000)   # small data URL made by the browser, kept to show it
+    thumbnail: str = Field(default="", max_length=300_000)   # data URL made by the browser: shown, and tried on
 
 
 MAX_PHOTO_BYTES = 10 * 1024 * 1024   # Vertex AI Virtual Try-On's input limit
@@ -171,17 +172,18 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     async def try_on(body: TryOnRequest, shopper: Shopper = Depends(current_shopper)) -> Response:
         try:
             products = await chat.products(shopper.id, body.session_id, body.product_ids)
+            owned = await chat.wardrobe_items(shopper.id, body.session_id, body.wardrobe_ids)
             photo = base64.b64decode(body.photo, validate=True)
         except LookupError:
             raise HTTPException(status_code=404, detail="Conversation not found. Please start again.")
         except binascii.Error:
             raise HTTPException(status_code=400, detail="That photo couldn't be read.")
-        if not products:
+        if not products and not owned:
             raise HTTPException(status_code=404, detail="I can't find those items in our conversation.")
         if len(photo) > MAX_PHOTO_BYTES:
             raise HTTPException(status_code=413, detail="That photo is too large. Please use one under 10 MB.")
         try:
-            image = await asyncio.to_thread(studio.dress, photo, body.mime_type, products)
+            image = await asyncio.to_thread(studio.dress, photo, body.mime_type, products, owned)
         except TryOnError as error:
             raise HTTPException(status_code=422, detail=str(error))
         return Response(content=image, media_type="image/png")

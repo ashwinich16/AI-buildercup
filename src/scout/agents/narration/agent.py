@@ -130,6 +130,7 @@ In one to three short sentences, tell them clearly what happened and where thing
 - Already empty: say kindly there was nothing in the cart.
 - Not clear which item: ask which one, naming the items by number.
 - Viewing: list the items with prices and the total. If empty, say so warmly.
+- Outfit finished (outfit_finished): say their outfit is complete and its new pieces are in the cart, with the total, then ask what they would like to shop for next.
 - Checkout: read back the items and total, then say honestly that payment is not connected in this prototype yet, and that their cart is saved.
 Then offer ONE useful next step. Never invent items or prices.
 Refer to cart items by the kind given, never by a guessed kind.
@@ -292,9 +293,9 @@ class NarrationAgentBuilder:
             task = ("In two to four short sentences, describe the whole outfit together like a stylist friend: how "
                     f"the pieces work for the occasion, and the total. {BOARD_DONE}")
         elif event == state_keys.CAPSULE_PLANNED:
-            task = ("In about 60 to 100 words, share the plan: how many looks, how much comes from their own wardrobe, which of their pieces "
-                    "you would leave at home and why (kindly, in a few words), and which few new pieces you suggest "
-                    "buying, each with how many looks it unlocks. Mention the total, and the budget if they gave "
+            task = ("In about 60 to 100 words, share the plan: how many looks, how much comes from their own wardrobe, "
+                    "and which few new pieces you suggest buying, each with how many looks it unlocks. Do not list "
+                    "the pieces you left out; at most say in a few words that you left out ones that don't suit it. Mention the total, and the budget if they gave "
                     "one. If a new piece could not be found in the shop, say so honestly. Do not repeat that you "
                     f"are planning: you already said so. {BOARD_DONE}")
         else:

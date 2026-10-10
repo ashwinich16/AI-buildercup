@@ -1,7 +1,7 @@
 import { formatPrice } from "../format.js";
 
 // The outfit plan as a board: one row per look (day or occasion), the shopper's own pieces next to the few
-// new ones; then what to pack, what to leave at home (and why), and the new pieces to buy. Scout says it out loud too; the buttons are one-press shortcuts
+// new ones, each look ready to try on; then the new pieces to buy. Scout says it out loud too; the buttons are one-press shortcuts
 // that go through the conversation like anything the shopper says.
 export default function CapsuleBoard({ capsule, busy, onAsk, onTryOn, onOpenWardrobe }) {
   if (!capsule) return null;
@@ -34,10 +34,12 @@ export default function CapsuleBoard({ capsule, busy, onAsk, onTryOn, onOpenWard
           <li key={`${look.title}-${index}`} className="capsule__look">
             <div className="capsule__look-head">
               <h3 className="capsule__look-title">{look.title}</h3>
-              {look.product_ids.length > 0 && (
+              {look.product_ids.length + look.wardrobe_ids.length > 0 && (
                 <button
                   className="button button--ghost button--small"
-                  onClick={() => onTryOn({ productIds: look.product_ids, label: `${look.title} look` })}
+                  onClick={() =>
+                    onTryOn({ productIds: look.product_ids, wardrobeIds: look.wardrobe_ids, label: `${look.title} look` })
+                  }
                 >
                   Try this look on
                 </button>
@@ -63,9 +65,6 @@ export default function CapsuleBoard({ capsule, busy, onAsk, onTryOn, onOpenWard
           </li>
         ))}
       </ol>
-
-      {capsule.packed.length > 0 && <OwnPieces title="Pack these" pieces={capsule.packed} />}
-      {capsule.leave_at_home.length > 0 && <OwnPieces title="Better left at home" pieces={capsule.leave_at_home} />}
 
       {capsule.new_pieces.length > 0 && (
         <div className="capsule__buy">
@@ -117,24 +116,6 @@ export default function CapsuleBoard({ capsule, busy, onAsk, onTryOn, onOpenWard
         </button>
       </div>
     </section>
-  );
-}
-
-// The shopper's own pieces in a row; for ones better left at home, the reason under each.
-function OwnPieces({ title, pieces }) {
-  return (
-    <div className="capsule__buy">
-      <h3 className="capsule__look-title">{title}</h3>
-      <ul className="capsule__tiles" role="list">
-        {pieces.map((piece, index) => (
-          <li key={index} className="capsule__tile is-owned">
-            <div className="capsule__image">{piece.image_url ? <img src={piece.image_url} alt="" loading="lazy" /> : null}</div>
-            <p className="capsule__name">{piece.description}</p>
-            {piece.why && <p className="capsule__why muted">{piece.why}</p>}
-          </li>
-        ))}
-      </ul>
-    </div>
   );
 }
 

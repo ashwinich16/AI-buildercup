@@ -78,7 +78,6 @@ class BoardTile(BaseModel):
     description: str
     image_url: Optional[str] = None
     owned: bool = False
-    why: str = ""                                          # for a piece better left at home: the reason
     pending: bool = False                                  # guided: a new piece not chosen yet (an empty slot)
     current: bool = False                                  # guided: the piece being chosen now
 
@@ -88,6 +87,7 @@ class LookView(BaseModel):
     why: str = ""
     tiles: list[BoardTile] = Field(default_factory=list)
     product_ids: list[str] = Field(default_factory=list)   # the new pieces in it, to try the look on
+    wardrobe_ids: list[str] = Field(default_factory=list)  # their own pieces in it, tried on with the new ones
 
 
 class NewPieceView(BaseModel):
@@ -104,8 +104,6 @@ class CapsuleView(BaseModel):
     """The outfit board: one look per day or occasion, and the few new pieces to buy."""
     occasion: str
     looks: list[LookView] = Field(default_factory=list)
-    packed: list[BoardTile] = Field(default_factory=list)          # their own pieces that work for the trip
-    leave_at_home: list[BoardTile] = Field(default_factory=list)   # their own pieces that don't, and why
     new_pieces: list[NewPieceView] = Field(default_factory=list)
     total: float = 0.0
     budget: Optional[float] = None
@@ -118,6 +116,7 @@ class ScreenState(BaseModel):
     cart: CartView = Field(default_factory=CartView)
     suggestion: Optional[SmallProductCard] = None
     capsule: Optional[CapsuleView] = None
+    planning_outfit: bool = False     # outfit mode: everything is for the outfit until it is finished or left
     wardrobe: list[WardrobeItem] = Field(default_factory=list)
 
 
@@ -262,6 +261,11 @@ class ScoutChatService:
         if capsule:
             known.update({product.id: product for product in capsule.products_to_buy()})
         return [known[i] for i in product_ids if i in known]
+
+    async def wardrobe_items(self, user_id: str, session_id: str, item_ids: list[str]) -> list[WardrobeItem]:
+        """Pieces the shopper owns, in the order asked (e.g. to try a look on)."""
+        owned = {item.id: item for item in state_keys.wardrobe((await self._get(user_id, session_id)).state)}
+        return [owned[i] for i in item_ids if i in owned]
 
     async def add_to_wardrobe(self, user_id: str, session_id: str, added: list[WardrobeItem]) -> list[WardrobeItem]:
         """Remember pieces the shopper owns (from a photo). Scout mentions them in its next reply.
@@ -433,7 +437,9 @@ def _screen_from_state(state: dict) -> ScreenState:
     cart = state_keys.cart(state)
     return ScreenState(products=cards, focus_product_id=state.get(state_keys.FOCUS_PRODUCT),
                        cart=CartView(items=cart.items, total=cart.total),
-                       suggestion=_suggestion_card(state), capsule=_capsule_view(state.get(state_keys.CAPSULE)),
+                       suggestion=_suggestion_card(state), capsule=_capsule_view(state.get(state_keys.CAPSULE),
+                                                                         state_keys.wardrobe(state)),
+                       planning_outfit=state_keys.planning_outfit(state),
                        wardrobe=state_keys.wardrobe(state))
 
 
@@ -445,11 +451,13 @@ def _suggestion_card(state: dict) -> Optional[SmallProductCard]:
                                                              "reasons": suggestion.reasons})
 
 
-def _capsule_view(raw: Optional[dict]) -> Optional[CapsuleView]:
+def _capsule_view(raw: Optional[dict], wardrobe: list[WardrobeItem]) -> Optional[CapsuleView]:
+    """The board. Pictures of their own pieces come from their wardrobe (the plan keeps only the words)."""
     if not raw:
         return None
     capsule = Capsule.model_validate(raw)
-    owned = {item.id: item for item in capsule.wardrobe}
+    pictures = {item.id: item.thumbnail for item in wardrobe}
+    owned = {item.id: item.model_copy(update={"thumbnail": pictures.get(item.id)}) for item in capsule.wardrobe}
     looks = []
     for look in capsule.plan.looks:
         tiles = []
@@ -463,19 +471,15 @@ def _capsule_view(raw: Optional[dict]) -> Optional[CapsuleView]:
             elif capsule.guided and (new := capsule.new_piece(piece.new or "")) and new.key not in capsule.skipped:
                 tiles.append(BoardTile(description=new.category, pending=True, current=new.key == capsule.current))
         looks.append(LookView(title=look.title, why=look.why, tiles=tiles,
-                              product_ids=[p.id for p in capsule.look_products(look)]))
-    used = dict.fromkeys(piece.owned for look in capsule.plan.looks for piece in look.pieces if piece.owned in owned)
-    packed = [BoardTile(description=owned[i].description, image_url=owned[i].thumbnail, owned=True) for i in used]
-    left = [BoardTile(description=owned[x.owned].description, image_url=owned[x.owned].thumbnail, owned=True,
-                      why=x.why) for x in capsule.plan.leave_at_home if x.owned in owned]
+                              product_ids=[p.id for p in capsule.look_products(look)],
+                              wardrobe_ids=[p.owned for p in look.pieces if p.owned in owned and owned[p.owned].thumbnail]))
     worn = [piece.new for look in capsule.plan.looks for piece in look.pieces if piece.new]
     new_pieces = [NewPieceView(key=p.key, category=p.category, why=p.why, looks=worn.count(p.key),
                                product=_small_card(capsule.picks[p.key]) if p.key in capsule.picks else None,
                                current=p.key == capsule.current, skipped=p.key in capsule.skipped)
                   for p in capsule.plan.new_pieces]
     total = sum(p.price or 0 for p in capsule.products_to_buy())
-    return CapsuleView(occasion=capsule.plan.occasion, looks=looks, packed=packed, leave_at_home=left,
-                       new_pieces=new_pieces,
+    return CapsuleView(occasion=capsule.plan.occasion, looks=looks, new_pieces=new_pieces,
                        total=round(total, 2), budget=capsule.budget, guided=capsule.guided)
 
 
