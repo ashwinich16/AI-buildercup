@@ -18,6 +18,7 @@ class CartItem(BaseModel):
     name: str
     price: Optional[float] = None
     kind: Optional[str] = None          # e.g. "jeans": long titles are cut, and the kind must not be guessed
+    image_url: Optional[str] = None     # a small photo for the cart list
 
 
 class Cart(BaseModel):
@@ -28,7 +29,8 @@ class Cart(BaseModel):
         if any(item.product_id == product.id for item in self.items):
             return False
         self.items.append(CartItem(product_id=product.id, name=" ".join(product.title.split()[:10]),
-                                   price=product.price, kind=product.kind or None))
+                                   price=product.price, kind=product.kind or None,
+                                   image_url=product.image_urls[0] if product.image_urls else None))
         return True
 
     def remove(self, positions: list[int]) -> list[CartItem]:

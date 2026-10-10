@@ -282,9 +282,13 @@ class NarrationAgentBuilder:
         piece = capsule.new_piece(capsule.current) if capsule and capsule.current else None
         options = ""
         if piece is not None:                    # guided: they are choosing this piece now
+            suits = [f"- option {n}: {capsule.fit_notes[pid]}"
+                     for n, pid in enumerate(state.get(state_keys.PRESENTED) or [], start=1) if pid in capsule.fit_notes]
             options = (f"\nOPTIONS FOR THE {piece.category.upper()} (what to look for: {piece.looks_like})\n"
                        f"{_search_note(state, capsule.need_for(piece, state_keys.need(state)))}\n"
-                       f"{_presented_text(state)}\n")
+                       f"{_presented_text(state)}\n"
+                       + ("WHY EACH SUITS THE OCCASION (say this for each one)\n" + "\n".join(suits) + "\n"
+                          if suits else ""))
             present = (f"present these options for the {piece.category} in about 60 to 90 words: how each would "
                        "suit the occasion and go with the rest of the outfit, honest about [exact match] vs "
                        f"[related], making the order clear.\n{SCREEN_CUE}\n{CHOOSING_ENDS}")

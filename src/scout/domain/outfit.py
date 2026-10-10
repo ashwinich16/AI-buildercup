@@ -74,6 +74,7 @@ class Capsule(BaseModel):
     current: Optional[str] = None                                # guided: key of the piece being chosen now
     skipped: list[str] = Field(default_factory=list)             # guided: keys of pieces they did not want
     price_limits: dict[str, tuple[Optional[float], Optional[float]]] = Field(default_factory=dict)
+    fit_notes: dict[str, str] = Field(default_factory=dict)       # product id -> why it suits the occasion
     # new piece key -> (lowest, highest) price they gave for that piece alone
 
     def new_piece(self, key_or_category: str) -> Optional[NewPiece]:
@@ -174,7 +175,9 @@ class Capsule(BaseModel):
                 lines.append(f"- {piece.category}: nothing suitable found in the shop ({piece.why})")
             else:
                 price = f"${product.price:.2f}" if product.price is not None else "price not listed"
-                lines.append(f"- {piece.category}: {' '.join(product.title.split()[:10])}, {price} ({piece.why})")
+                suits = f"; for the occasion: {self.fit_notes[product.id]}" if product.id in self.fit_notes else ""
+                lines.append(f"- {piece.category}: {' '.join(product.title.split()[:10])}, {price} "
+                             f"({piece.why}{suits})")
         total = sum(p.price or 0 for p in self.products_to_buy())
         lines.append(f"New pieces total: ${total:.2f}" + (f" of a ${self.budget:.0f} budget" if self.budget else ""))
         return "\n".join(lines)

@@ -53,6 +53,7 @@ from scout.agents.model_io import content_text
 from scout.agents.narration import NarrationTask
 from scout.domain import Capsule, CapsulePlan, NewPiece, Product, ShoppingNeed
 from scout.tools import CatalogOverviewBuilder, ProductReferenceResolver, ProductRetriever, RetrievalResult
+from scout.tools.occasion_fit import OccasionRanker
 from scout.tools.recommendations import Recommender, Suggestion, SuggestionRules
 from scout.tools.wardrobe import new_item
 
@@ -79,11 +80,12 @@ class ScoutOrchestrator(BaseAgent):
     overview_builder: CatalogOverviewBuilder
     resolver: ProductReferenceResolver
     recommender: Recommender
+    occasion_ranker: Optional[OccasionRanker] = None   # outfit pieces best for the occasion first
 
     def __init__(self, elicitation: BaseAgent, narration: BaseAgent, product_expert: BaseAgent,
                  comparison: BaseAgent, preference: BaseAgent, stylist: BaseAgent, retriever: ProductRetriever,
                  overview_builder: CatalogOverviewBuilder, resolver: ProductReferenceResolver,
-                 recommender: Recommender, name: str = "scout"):
+                 recommender: Recommender, occasion_ranker: Optional[OccasionRanker] = None, name: str = "scout"):
         super().__init__(
             name=name,
             description="Scout, a voice shopping companion: routes each turn to the right step.",
@@ -97,6 +99,7 @@ class ScoutOrchestrator(BaseAgent):
             overview_builder=overview_builder,
             resolver=resolver,
             recommender=recommender,
+            occasion_ranker=occasion_ranker,
             sub_agents=[elicitation, narration, product_expert, comparison, preference, stylist],
         )
 
@@ -582,6 +585,8 @@ class ScoutOrchestrator(BaseAgent):
         if piece is not None:
             need = capsule.need_for(piece, base, wish)
             result = await asyncio.to_thread(self._search_piece, need, set(capsule.shown.get(piece.key, [])))
+            ranked = await asyncio.to_thread(self._for_occasion, capsule, piece, result.products)
+            result = result.model_copy(update={"products": ranked})
             options = result.products[:PRODUCTS_TO_PRESENT]
             capsule.offer(piece.key, [p.id for p in options])
             delta.update({
@@ -602,6 +607,7 @@ class ScoutOrchestrator(BaseAgent):
         def best(piece: NewPiece) -> Optional[Product]:
             piece_need = capsule.need_for(piece, need, wish)
             found = self._search_piece(piece_need, set(capsule.shown.get(piece.key, []))).products
+            found = self._for_occasion(capsule, piece, found)
             return next((p for p in found if self.retriever.fits(piece_need, p)), found[0] if found else None)
 
         if not pieces:
@@ -610,6 +616,15 @@ class ScoutOrchestrator(BaseAgent):
             for piece, product in zip(pieces, pool.map(best, pieces)):
                 if product is not None:
                     capsule.choose(piece.key, product)
+
+    def _for_occasion(self, capsule: Capsule, piece: NewPiece, products: list[Product]) -> list[Product]:
+        """The products found for a piece, best for the occasion first (search matches the piece, not the
+        occasion). Why each suits it is kept on the capsule, for Scout to say."""
+        if self.occasion_ranker is None:
+            return products
+        ranked, notes = self.occasion_ranker.rank(capsule.plan.occasion, piece.category, piece.looks_like, products)
+        capsule.fit_notes.update(notes)
+        return ranked
 
     def _search_piece(self, need: ShoppingNeed, exclude: set[str]) -> RetrievalResult:
         """Search for an outfit piece. The Stylist may name kinds the shop has few of; if none fit, any
