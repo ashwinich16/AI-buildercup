@@ -26,6 +26,12 @@ export default function SettingsSheet({ open, onClose, settings, onSettingsChang
           checked={settings.headphones}
           onChange={(v) => set("headphones", v)}
         />
+        <Switch
+          label="More time to finish speaking"
+          hint="Scout waits longer after you pause before it answers, so a long sentence isn't cut in two."
+          checked={settings.moreTime}
+          onChange={(v) => set("moreTime", v)}
+        />
         <label className="field">
           <span className="field__label">Speech speed</span>
           <select value={settings.rate} onChange={(e) => set("rate", Number(e.target.value))}>

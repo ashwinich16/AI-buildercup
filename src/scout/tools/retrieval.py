@@ -52,10 +52,10 @@ class ProductRetriever:
 
     @staticmethod
     def fits(need: ShoppingNeed, product: Product) -> bool:
-        """Does the product keep the need's firm limits (kind, whose style, budget)? Used to drop
-        products found earlier once the shopper tightens the need ("under $70")."""
+        """Does the product keep the need's firm limits (kind, whose style, price range)? Used to drop
+        products found earlier once the shopper tightens the need ("under $70", "over $30")."""
         return SearchQuery(category=need.category, product_types=need.product_types, gender=need.gender_filter(),
-                           max_price=need.budget_max).matches(product)
+                           min_price=need.budget_min, max_price=need.budget_max).matches(product)
 
     def find(self, need: ShoppingNeed, exclude_ids: Optional[set[str]] = None) -> RetrievalResult:
         """Exact matches first, topped up with related products. `exclude_ids` skips products already shown."""
@@ -119,7 +119,8 @@ class ProductRetriever:
         """Search plans from strictest to loosest.
 
         Budget is treated as a firm limit and details as nice-to-have, so details
-        are relaxed first and the budget only as a last resort.
+        are relaxed first and the budget only as a last resort. A lower price limit ("over $30") is what
+        they want, not a cost to save, so it is never relaxed.
         """
         full_text = need.search_text()
         short_text = need.looking_for or need.category or full_text
@@ -145,7 +146,8 @@ class ProductRetriever:
                 seen.add(key)
                 attempts.append((relaxed, SearchQuery(
                     text=text, category=need.category, product_types=need.product_types,
-                    gender=need.gender_filter(), max_price=max_price, limit=self._limit)))
+                    gender=need.gender_filter(), min_price=need.budget_min, max_price=max_price,
+                    limit=self._limit)))
         return attempts
 
     @staticmethod
@@ -179,7 +181,8 @@ class ProductRetriever:
     def _other_types(self, need: ShoppingNeed) -> list[str]:
         """Other kinds of product in the same category for the same person, most common first."""
         query = SearchQuery(text="" if need.category else need.search_text(), category=need.category,
-                            gender=need.gender_filter(), max_price=need.budget_max, limit=50)
+                            gender=need.gender_filter(), min_price=need.budget_min, max_price=need.budget_max,
+                            limit=50)
         wanted = {t.lower() for t in need.product_types}
         counts = Counter(p.product_type for p in self._catalog.search(query)
                          if p.product_type and p.product_type.lower() not in wanted)

@@ -82,7 +82,7 @@ NEXT OPTIONS TO PRESENT
 {products}
 
 YOUR TASK
-Make clear these are additional options, then present them: honest about [exact match] vs [related], one sentence each with what makes it different, making their order clear so they can refer back. About 60 to 100 words. End with ONE easy question.
+Make clear these are additional options, then present them: honest about [exact match] vs [related], one sentence each with what makes it different, making their order clear so they can refer back. Options marked [kept] are ones they chose to keep: say in a few words that you kept them, without describing them again, and describe only the new ones. About 60 to 100 words. End with ONE easy question.
 {cue}
 """
 
@@ -227,7 +227,7 @@ class NarrationAgentBuilder:
             need=state_keys.need(state).summary(),
             already_heard=already,
             search_note=_search_note(state),
-            products=_presented_text(state),
+            products=_presented_text(state, kept=set(state.get(state_keys.KEPT) or [])),
         )
 
     def _no_more_options_prompt(self, state: dict) -> str:
@@ -247,8 +247,12 @@ class NarrationAgentBuilder:
     def _cart_update_prompt(self, state: dict) -> str:
         event = state.get(state_keys.CART_EVENT) or {}
         suggestion = state_keys.suggestion(state)
+        next_up = state.get(state_keys.NEXT_UP) or []
         offer = ""
-        if suggestion and event.get("action") == "added":   # only right after adding, never when removing
+        if next_up and event.get("action") == "added":      # they asked for more things: those come first
+            offer = (f"\nSTILL TO LOOK FOR (they asked for these too): {', '.join(next_up)}\n"
+                     f"Your next step: offer to find the {next_up[0]} now.\n")
+        elif suggestion and event.get("action") == "added":   # only right after adding, never when removing
             offer = f"\nSUGGESTION (one item that goes with what they just added)\n{suggestion.to_prompt_text()}\n"
         return CART_UPDATE.format(
             voice=VOICE,
@@ -308,12 +312,13 @@ def _heard_text(heard: int) -> str:
     return "The shop has nothing that fits what they want now."
 
 
-def _presented_text(state: dict) -> str:
-    """The products chosen for this turn, each labelled exact or related."""
+def _presented_text(state: dict, kept: frozenset[str] | set[str] = frozenset()) -> str:
+    """The products chosen for this turn, each labelled exact or related (and kept, if the shopper kept it)."""
     need = state_keys.need(state)
     blocks = []
     for number, product in enumerate(state_keys.presented(state), start=1):
-        label = "[exact match]" if state_keys.is_exact(state, product.id) else "[related]"
+        label = "[kept]" if product.id in kept else (
+            "[exact match]" if state_keys.is_exact(state, product.id) else "[related]")
         evidence = _EVIDENCE.pick(product, need)
         proof = ("\nReview evidence (real quotes): " + "; ".join(e.as_text() for e in evidence)) if evidence else ""
         blocks.append(f"Option {number} {label}:\n{product.to_prompt_text()}{proof}")

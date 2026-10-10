@@ -1,12 +1,14 @@
 """
-What Scout remembers about a shopper between conversations: the name they
-asked to be called, their preferences and their cart.
+What Scout keeps in the database, behind two small interfaces:
 
-The ADK session holds only the current conversation (what is being searched,
-which options were just shown). Everything worth remembering lives here, so it
-survives server restarts and is shared by every Cloud Run instance.
+  ShopperRepository   what Scout remembers about a shopper between conversations: the name they asked to
+                      be called, their preferences, their cart and their wardrobe
+  ConversationStore   the current conversation, as one compact summary row (Scout's session state: what is
+                      being looked for, the options shown, the outfit plan, the last few exchanges), never
+                      the full message history. It lets a conversation carry on after a server restart or
+                      on another Cloud Run instance. Rows untouched for a week are deleted.
 
-Two interchangeable implementations:
+Both are kept here so they share one database connection. Two interchangeable implementations:
   CloudSqlShopperRepository  - Cloud SQL (PostgreSQL); used when SCOUT_DB_INSTANCE is set
   InMemoryShopperRepository  - in memory, for running without a database (lost on restart)
 
@@ -15,10 +17,11 @@ Preferences are stored as rows (attribute / value), never as one column per kind
 preference, so the tables don't depend on what the catalog sells.
 """
 
+import json
 import logging
 import threading
 from abc import ABC, abstractmethod
-from typing import Callable
+from typing import Callable, Optional
 
 from pydantic import BaseModel, Field
 
@@ -48,9 +51,28 @@ class ShopperRepository(ABC):
         """Remember this as the shopper's current state."""
 
 
-class InMemoryShopperRepository(ShopperRepository):
+class ConversationStore(ABC):
+    @abstractmethod
+    def save_conversation(self, user_id: str, session_id: str, summary: dict) -> None:
+        """Keep the conversation's summary (replacing the previous one)."""
+
+    @abstractmethod
+    def load_conversation(self, user_id: str, session_id: str) -> Optional[dict]:
+        """This shopper's conversation summary, or None if there is none."""
+
+    @abstractmethod
+    def delete_conversation(self, user_id: str, session_id: str) -> None:
+        """Forget the conversation (the shopper cleared it)."""
+
+    @abstractmethod
+    def latest_conversation(self, user_id: str) -> Optional[str]:
+        """The id of this shopper's most recent conversation, to carry on where they left off."""
+
+
+class InMemoryShopperRepository(ShopperRepository, ConversationStore):
     def __init__(self):
         self._shoppers: dict[str, ShopperMemory] = {}
+        self._conversations: dict[tuple[str, str], str] = {}   # in the order they were last saved
 
     def load(self, user_id: str) -> ShopperMemory:
         memory = self._shoppers.get(user_id)
@@ -59,8 +81,22 @@ class InMemoryShopperRepository(ShopperRepository):
     def save(self, user_id: str, memory: ShopperMemory) -> None:
         self._shoppers[user_id] = memory.model_copy(deep=True, update={"known": True})
 
+    def save_conversation(self, user_id: str, session_id: str, summary: dict) -> None:
+        self._conversations.pop((user_id, session_id), None)          # so the newest is always last
+        self._conversations[(user_id, session_id)] = json.dumps(summary, default=str)
 
-class CloudSqlShopperRepository(ShopperRepository):
+    def load_conversation(self, user_id: str, session_id: str) -> Optional[dict]:
+        saved = self._conversations.get((user_id, session_id))
+        return json.loads(saved) if saved else None
+
+    def delete_conversation(self, user_id: str, session_id: str) -> None:
+        self._conversations.pop((user_id, session_id), None)
+
+    def latest_conversation(self, user_id: str) -> Optional[str]:
+        return next((sid for uid, sid in reversed(self._conversations) if uid == user_id), None)
+
+
+class CloudSqlShopperRepository(ShopperRepository, ConversationStore):
     SCHEMA = [
         """CREATE TABLE IF NOT EXISTS shopper (
             user_id         TEXT PRIMARY KEY,
@@ -100,6 +136,15 @@ class CloudSqlShopperRepository(ShopperRepository):
             added_at    TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
             PRIMARY KEY (user_id, item_id)
         )""",
+        """CREATE TABLE IF NOT EXISTS conversation (
+            user_id     TEXT NOT NULL,
+            session_id  TEXT NOT NULL,
+            summary     TEXT NOT NULL,
+            updated_at  TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            PRIMARY KEY (user_id, session_id)
+        )""",
+        # Conversations nobody came back to within a week are not worth keeping.
+        "DELETE FROM conversation WHERE updated_at < CURRENT_TIMESTAMP - INTERVAL '7 days'",
     ]
 
     def __init__(self, connect: Callable[[], object]):
@@ -214,6 +259,35 @@ class CloudSqlShopperRepository(ShopperRepository):
                 "name = EXCLUDED.name, price = EXCLUDED.price, kind = EXCLUDED.kind, position = EXCLUDED.position",
                 (user_id, item.product_id, item.name, item.price, item.kind, position))
 
+    # ----- the current conversation -----
+
+    def save_conversation(self, user_id: str, session_id: str, summary: dict) -> None:
+        self._run(lambda cursor: cursor.execute(
+            "INSERT INTO conversation (user_id, session_id, summary) VALUES (%s, %s, %s) "
+            "ON CONFLICT (user_id, session_id) DO UPDATE SET summary = EXCLUDED.summary, "
+            "updated_at = CURRENT_TIMESTAMP",
+            (user_id, session_id, json.dumps(summary, default=str))))
+
+    def load_conversation(self, user_id: str, session_id: str) -> Optional[dict]:
+        def load(cursor):
+            cursor.execute("SELECT summary FROM conversation WHERE user_id = %s AND session_id = %s",
+                           (user_id, session_id))
+            row = cursor.fetchone()
+            return json.loads(row[0]) if row else None
+        return self._run(load)
+
+    def delete_conversation(self, user_id: str, session_id: str) -> None:
+        self._run(lambda cursor: cursor.execute(
+            "DELETE FROM conversation WHERE user_id = %s AND session_id = %s", (user_id, session_id)))
+
+    def latest_conversation(self, user_id: str) -> Optional[str]:
+        def latest(cursor):
+            cursor.execute("SELECT session_id FROM conversation WHERE user_id = %s "
+                           "ORDER BY updated_at DESC LIMIT 1", (user_id,))
+            row = cursor.fetchone()
+            return row[0] if row else None
+        return self._run(latest)
+
     # ----- connection handling -----
 
     def _run(self, work):
@@ -246,7 +320,8 @@ class CloudSqlShopperRepository(ShopperRepository):
         self._connection = None
 
 
-def build_shopper_repository(settings: Settings) -> ShopperRepository:
+def build_shopper_repository(settings: Settings) -> CloudSqlShopperRepository | InMemoryShopperRepository:
+    """One object for both interfaces (ShopperRepository and ConversationStore), sharing the connection."""
     if not settings.db_instance:
         logger.warning("SCOUT_DB_INSTANCE not set: names, preferences and carts live in memory only.")
         return InMemoryShopperRepository()

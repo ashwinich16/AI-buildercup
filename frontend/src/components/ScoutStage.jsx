@@ -52,10 +52,14 @@ export function Orb({ state, active, ready, supported, onToggle, small = false }
 // `starters`: the shop's categories, so a new shopper can start with one press (they can also just talk).
 // `choices`: short answers to Scout's question; tap one or more, then send (or just say them).
 export default function ScoutStage({
-  messages, busy, speaking, paused, ready, voiceInput, empty, starters = [], choices = [], onToggleListening, onAsk,
+  messages, busy, speaking, paused, ready, voiceInput, empty, starters = [], choices = [], showHistory = false,
+  onToggleListening, onAsk,
 }) {
   const state = scoutState({ ready, voiceInput, busy, speaking, paused });
   const [historyOpen, setHistoryOpen] = useState(false);
+  useEffect(() => {
+    if (showHistory) setHistoryOpen(true);   // carrying on a conversation: show what was said
+  }, [showHistory]);
 
   const last = messages[messages.length - 1];
   const lastScout = [...messages].reverse().find((m) => m.role === "scout");

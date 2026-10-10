@@ -17,6 +17,7 @@ NEED = "need"                        # ShoppingNeed as a dict, built up over the
 TURN = "turn"                        # latest TurnUnderstanding from the Elicitation agent
 QUESTIONS_ASKED = "questions_asked"  # clarifying questions asked for the current need
 LAST_QUESTION = "last_question"      # the question Scout asked last, to read short answers
+NEXT_UP = "next_up"                  # other categories they asked for together, to look at after the current one
 CATALOG_OVERVIEW = "catalog_overview"  # text summary of what the catalog has close to the request
 
 # Search results and what was said about them
@@ -24,13 +25,14 @@ SHORTLIST = "shortlist"              # products found by Retrieval (list of Prod
 EXACT_MATCHES = "exact_matches"      # ids in the shortlist that match everything asked for
 RELAXED = "relaxed"                  # what Retrieval had to relax, e.g. ["details"]
 OTHER_TYPES = "other_types"          # other kinds in stock for the same person, offered when few matched
+KEPT = "kept"                        # ids among PRESENTED the shopper chose to keep while the others were replaced
 PRESENTED = "presented"              # ids of the products spoken this time, in spoken order
 SEEN = "seen"                        # ids of every product presented for the current need
 FOCUS_PRODUCT = "focus_product"      # id of the product currently being discussed
 COMPARE_IDS = "compare_ids"          # ids of the products being compared
 COMPARISON = "comparison"            # latest ComparisonResult from the Comparison agent
 NARRATION_TASK = "narration_task"    # what the Narration agent should speak next
-RECENT_TURNS = "recent_turns"        # the last few exchanges, word for word: [{"shopper": ..., "scout": ...}]
+CONVERSATION = "conversation"        # every exchange, word for word (capped): [{"shopper": ..., "scout": ...}]
 
 # Cart and preferences
 CART_EVENT = "cart_event"            # what just happened to the cart, for Narration to speak
@@ -115,9 +117,19 @@ def wardrobe(state) -> list[WardrobeItem]:
     return [WardrobeItem.model_validate(item) for item in state.get(WARDROBE) or []]
 
 
+RECENT_TURNS_SHOWN = 6   # exchanges an agent sees word for word (the need, cart and profile hold the rest)
+SCOUT_WORDS_SHOWN = 400  # characters of each reply: enough to know what was said, small enough to stay fast
+
+
+def conversation(state) -> list[dict]:
+    """Every exchange so far, oldest first (shown again when the shopper comes back)."""
+    return list(state.get(CONVERSATION) or [])
+
+
 def recent_turns_text(state) -> str:
     """The last few exchanges, oldest first, for an agent that needs the flow of the conversation."""
     lines = []
-    for turn in state.get(RECENT_TURNS) or []:
-        lines += [f"Shopper: {turn.get('shopper', '')}", f"Scout: {turn.get('scout', '')}"]
+    for turn in conversation(state)[-RECENT_TURNS_SHOWN:]:
+        reply = " ".join(turn.get("scout", "").split())[:SCOUT_WORDS_SHOWN]
+        lines += [f"Shopper: {turn.get('shopper', '')}", f"Scout: {reply}"]
     return "\n".join(lines) or "This is the start of the conversation."

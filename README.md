@@ -228,9 +228,11 @@ gcloud run deploy scout --source . --region us-central1 \
 ```
 
 The Dockerfile builds the React app and starts the API, so no separate frontend deploy is needed.
-Names, preferences and carts are kept in Cloud SQL (`SCOUT_DB_*`), so they survive restarts and are shared by
-every instance. The current conversation lives in the instance's memory, so `--session-affinity` keeps a
-shopper on the same instance. The service account needs: Vertex AI User, Discovery Engine Viewer,
+Names, preferences, carts and wardrobes are kept in Cloud SQL (`SCOUT_DB_*`), so they survive restarts and are
+shared by every instance. The current conversation lives in the instance's memory and is also saved after every
+turn as one compact summary row (table `conversation`, created automatically; rows idle for a week are deleted),
+so it carries on after a restart or on another instance. `--session-affinity` still keeps a shopper on one
+instance, which avoids rebuilding it. The service account needs: Vertex AI User, Discovery Engine Viewer,
 Cloud Text-to-Speech access, Cloud SQL Client, Secret Manager Secret Accessor.
 
 ## Troubleshooting

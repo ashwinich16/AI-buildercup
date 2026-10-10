@@ -2,7 +2,9 @@
 Scout web API (FastAPI). Serves the React app and these endpoints:
 
   GET  /api/auth-config     how the frontend signs in (demo personas or Firebase settings)
-  POST /api/sessions        start a conversation; returns Scout's opening words
+  POST /api/sessions        carry on the shopper's last conversation (with what was said), or start a new one
+                            ({"fresh": true}); returns Scout's opening words
+  DELETE /api/sessions/{id} clear a conversation (the shopper's name, preferences, cart and wardrobe are kept)
   POST /api/chat/stream     send a message; Scout's reply streams back as it is written, then what
                             to show (newline-delimited JSON)
   POST /api/speech          Scout's reply as natural speech (MP3)
@@ -58,6 +60,7 @@ class ChatRequest(BaseModel):
 
 class StartRequest(BaseModel):
     preferred_name: str = Field(default="", max_length=40)   # "What should Scout call you?" (optional)
+    fresh: bool = False          # start a new conversation instead of carrying on the last one ("New chat")
 
 
 class SpeechRequest(BaseModel):
@@ -92,7 +95,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     settings = settings or get_settings()
     catalog = build_catalog(settings)
     root = build_root_agent(settings, catalog)
-    chat = ScoutChatService(root, build_shopper_repository(settings))
+    store = build_shopper_repository(settings)          # the shopper's memory and the conversation summaries
+    chat = ScoutChatService(root, store, store)
     auth = build_authenticator(settings)
     speech = SpeechSynthesizer(settings.tts_voice)
     studio = TryOnStudio(settings, ImageFetcher())
@@ -126,12 +130,20 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         try:
             started = await chat.start_session(shopper.id, shopper.first_name,
                                                persona.preferences if persona else None,
-                                               preferred_name=body.preferred_name.strip())
+                                               preferred_name=body.preferred_name.strip(), fresh=body.fresh)
             return started.model_copy(update={"categories": await asyncio.to_thread(catalog.categories)})
         except Exception:
             logger.exception("Could not start a conversation for %s", shopper.id)
             raise HTTPException(status_code=503, detail="I can't reach your saved cart and preferences "
                                                         "right now. Please try again in a moment.")
+
+    @app.delete("/api/sessions/{session_id}")
+    async def end_session(session_id: str, shopper: Shopper = Depends(current_shopper)) -> dict:
+        try:
+            await chat.end_session(shopper.id, session_id)
+        except LookupError:
+            pass                                   # already gone: nothing to clear
+        return {"cleared": True}
 
     @app.post("/api/chat/stream")
     async def stream_message(body: ChatRequest, shopper: Shopper = Depends(current_shopper)) -> StreamingResponse:

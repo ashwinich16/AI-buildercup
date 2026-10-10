@@ -4,7 +4,9 @@ state into what the UI shows (spoken reply, product cards, cart).
 
 Two kinds of memory:
   - the ADK session (in memory): only the current conversation, such as what is
-    being searched and which options were just presented
+    being searched and which options were just presented. After every turn it is also saved as one
+    compact summary row (ConversationStore, Cloud SQL), so if this server restarts, or the shopper's
+    next message reaches another Cloud Run instance, the conversation is rebuilt from it and carries on.
   - the ShopperRepository (Cloud SQL): what Scout remembers about the shopper
     (name, preferences, cart, the clothes they own). It is loaded into the session when a conversation
     starts, and saved after any turn that changed it.
@@ -13,7 +15,7 @@ Two kinds of memory:
 import asyncio
 import logging
 import re
-from typing import AsyncIterator, Optional
+from typing import AsyncIterator, Literal, Optional
 
 from google.adk.agents import BaseAgent
 from google.adk.agents.run_config import RunConfig, StreamingMode
@@ -26,7 +28,7 @@ from pydantic import BaseModel, Field
 from scout.agents import state_keys
 from scout.agents.elicitation import read_turn
 from scout.agents.model_io import content_text
-from scout.api.shopper_repository import ShopperMemory, ShopperRepository
+from scout.api.shopper_repository import ConversationStore, ShopperMemory, ShopperRepository
 from scout.domain import Capsule, Preference, PreferenceProfile, Product, WardrobeItem
 from scout.tools import Cart, CartItem, EvidencePicker
 
@@ -125,23 +127,33 @@ class ChatTurn(ScreenState):
     choices: list[str] = Field(default_factory=list)   # short answers to Scout's question, to tap
 
 
+class ChatMessage(BaseModel):
+    role: Literal["shopper", "scout"]
+    text: str
+
+
 class StartedSession(ScreenState):
     session_id: str
     greeting: str
+    resumed: bool = False                                     # carrying on their last conversation
+    history: list[ChatMessage] = Field(default_factory=list)  # that conversation so far, to show again
     shopper_name: str = ""            # what Scout calls the shopper
     categories: list[str] = Field(default_factory=list)   # what the shop sells: first things to ask for
 
 
 class ScoutChatService:
-    def __init__(self, agent: BaseAgent, shoppers: ShopperRepository):
+    def __init__(self, agent: BaseAgent, shoppers: ShopperRepository, conversations: ConversationStore):
         self._shoppers = shoppers
+        self._conversations = conversations
+        self._saving: set[asyncio.Task] = set()    # conversation saves running in the background
         self._sessions = InMemorySessionService()
         self._runner = Runner(app_name=APP_NAME, agent=agent, session_service=self._sessions)
 
     async def start_session(self, user_id: str, display_name: str = "",
                             seed_preferences: Optional[list[Preference]] = None,
-                            preferred_name: str = "") -> StartedSession:
-        """New conversation, with Scout's opening words.
+                            preferred_name: str = "", fresh: bool = False) -> StartedSession:
+        """Carry on the shopper's last conversation (as they left it, with what was said), or start a new one
+        when there is none or they asked for a fresh one (`fresh`). With Scout's opening words.
 
         Name: the one the shopper just typed (remembered for next time), else the one
         they typed before, else the name from their account. Demo seed preferences
@@ -155,12 +167,29 @@ class ScoutChatService:
             memory.preferences = PreferenceProfile().merge(seed_preferences, [])
         await asyncio.to_thread(self._shoppers.save, user_id, memory)   # also records this visit
 
+        name = memory.preferred_name or display_name
+        session = None if fresh else await self._last_conversation(user_id)
+        if session is not None:
+            return StartedSession(session_id=session.id, greeting=_welcome_back(name), shopper_name=name,
+                                  resumed=True, history=_history(session.state),
+                                  **_screen_from_state(session.state).model_dump())
+
         session = await self._sessions.create_session(app_name=APP_NAME, user_id=user_id,
                                                       state=_state_from_memory(memory))
-        name = memory.preferred_name or display_name
+        await self._keep_conversation(user_id, session)   # can carry on even if this server restarts now
         greeting = _greeting(name, returning, memory.cart)
         return StartedSession(session_id=session.id, greeting=greeting, shopper_name=name,
                               **_screen_from_state(session.state).model_dump())
+
+    async def _last_conversation(self, user_id: str):
+        """The shopper's most recent conversation, if there is one worth carrying on (something was said)."""
+        try:
+            session_id = await asyncio.to_thread(self._conversations.latest_conversation, user_id)
+            session = await self._get(user_id, session_id) if session_id else None
+        except Exception:                   # can't reach it: a new conversation is always fine
+            logger.exception("Could not load the last conversation for shopper %s", user_id)
+            return None
+        return session if session is not None and state_keys.conversation(session.state) else None
 
     async def send_stream(self, user_id: str, session_id: str, text: str) -> AsyncIterator[dict]:
         """One turn of the conversation. Scout's words arrive while they are being written, so the shopper
@@ -201,6 +230,7 @@ class ScoutChatService:
 
         session = await self._get(user_id, session_id)
         await self._remember(user_id, before, _memory_from_state(session.state))
+        self._keep_conversation_later(user_id, session)   # never makes the shopper wait
         turn = read_turn(session.state)
         action = _ACTIONS.get(turn.intent) if turn else None
         reply = "\n\n".join(replies)
@@ -210,6 +240,12 @@ class ScoutChatService:
         choices = turn.choices if turn and turn.question and not turn.ready_to_search else []
         done = ChatTurn(reply=reply, action=action, choices=choices, **_screen_from_state(session.state).model_dump())
         yield {"type": "done", **done.model_dump(mode="json")}
+
+    async def end_session(self, user_id: str, session_id: str) -> None:
+        """Forget this conversation (the shopper cleared it). What Scout remembers about them is kept."""
+        await self._get(user_id, session_id)            # only their own conversation
+        await self._sessions.delete_session(app_name=APP_NAME, user_id=user_id, session_id=session_id)
+        await asyncio.to_thread(self._conversations.delete_conversation, user_id, session_id)
 
     async def ensure_session(self, user_id: str, session_id: str) -> None:
         """Raises LookupError if this shopper has no such conversation."""
@@ -253,10 +289,40 @@ class ScoutChatService:
         return wardrobe
 
     async def _get(self, user_id: str, session_id: str):
+        """This shopper's conversation: from memory, or rebuilt from its saved summary (after a restart, or
+        on another instance). Raises LookupError if there is neither."""
         session = await self._sessions.get_session(app_name=APP_NAME, user_id=user_id, session_id=session_id)
-        if session is None:
+        if session is not None:
+            return session
+        summary = await asyncio.to_thread(self._conversations.load_conversation, user_id, session_id)
+        if summary is None:
             raise LookupError("Conversation not found")
-        return session
+        memory = await asyncio.to_thread(self._shoppers.load, user_id)   # always the latest cart and wardrobe
+        try:
+            return await self._sessions.create_session(app_name=APP_NAME, user_id=user_id, session_id=session_id,
+                                                       state={**summary, **_state_from_memory(memory)})
+        except Exception:      # rebuilt by another request at the same moment: use that one
+            session = await self._sessions.get_session(app_name=APP_NAME, user_id=user_id, session_id=session_id)
+            if session is None:
+                raise
+            return session
+
+    def _keep_conversation_later(self, user_id: str, session) -> None:
+        """Save the conversation in the background, so the turn ends without waiting for the database.
+        The summary is taken now, so it is exactly this turn's."""
+        task = asyncio.create_task(self._save_summary(user_id, session.id, _summary(session.state)))
+        self._saving.add(task)                       # keep a reference until it is done
+        task.add_done_callback(self._saving.discard)
+
+    async def _keep_conversation(self, user_id: str, session) -> None:
+        await self._save_summary(user_id, session.id, _summary(session.state))
+
+    async def _save_summary(self, user_id: str, session_id: str, summary: dict) -> None:
+        """A failed save never breaks the reply: the conversation is still in this server's memory."""
+        try:
+            await asyncio.to_thread(self._conversations.save_conversation, user_id, session_id, summary)
+        except Exception:
+            logger.exception("Could not save the conversation for shopper %s", user_id)
 
     async def _remember(self, user_id: str, before: ShopperMemory, after: ShopperMemory) -> None:
         """Save the shopper's memory if this turn changed it. A failed save never breaks the reply."""
@@ -266,6 +332,17 @@ class ScoutChatService:
             await asyncio.to_thread(self._shoppers.save, user_id, after)
         except Exception:
             logger.exception("Could not save what Scout learned about shopper %s", user_id)
+
+
+def _summary(state: dict) -> dict:
+    """What is saved of a conversation: its session state, without what the shopper's memory already keeps
+    (name, preferences, cart, wardrobe) or ADK's per-user keys."""
+    return {key: value for key, value in state.items()
+            if key not in _MEMORY_KEYS and not key.startswith(("user:", "app:", "temp:"))}
+
+
+# Session keys that come from the shopper's memory (ShopperRepository), so a conversation summary leaves them out.
+_MEMORY_KEYS = {state_keys.SHOPPER_NAME, state_keys.PREFERENCES, state_keys.CART, state_keys.WARDROBE}
 
 
 def _state_from_memory(memory: ShopperMemory) -> dict:
@@ -288,6 +365,22 @@ def _memory_from_state(state: dict) -> ShopperMemory:
 
 
 _ACTIONS = {"pause": "pause", "end_conversation": "end"}   # intents the UI acts on (go quiet / stop listening)
+
+
+def _welcome_back(name: str) -> str:
+    """Opening words when carrying on a conversation: short, since what was said is on screen."""
+    return f"Welcome back{', ' + name if name else ''}! Let's carry on where we left off."
+
+
+def _history(state: dict) -> list[ChatMessage]:
+    """The conversation so far, as it was shown."""
+    messages = []
+    for turn in state_keys.conversation(state):
+        messages.append(ChatMessage(role="shopper", text=turn.get("shopper", "")))
+        reply = _FORMATTING.sub("", turn.get("scout", "")).strip()
+        if reply:                              # a pause has no reply
+            messages.append(ChatMessage(role="scout", text=reply))
+    return [m for m in messages if m.text]
 
 
 def _greeting(name: str, returning: bool, cart: Cart) -> str:

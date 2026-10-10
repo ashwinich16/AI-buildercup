@@ -75,6 +75,13 @@ class TurnUnderstanding(BaseModel):
         default_factory=list, max_length=5,
         description="With a question: two to five very short answers the shopper can tap (a few words each)")
     understood: str = Field(description="One short sentence restating what the shopper wants now")
+    style_answer: Optional[Literal["men", "women", "any"]] = Field(
+        default=None, description="Only when your last question asked whose style it is: the style their reply "
+                                  "names (any = it does not matter); otherwise null")
+    next_up: list[str] = Field(
+        default_factory=list, max_length=5,
+        description="Other kinds of product they asked for in this message besides the one in need, as catalog "
+                    "categories, to look at afterwards")
     unavailable_category: Optional[str] = Field(
         default=None, description="A kind of product the shopper asked for that is not in the catalog")
     product_reference: Optional[str] = Field(
@@ -82,6 +89,10 @@ class TurnUnderstanding(BaseModel):
     product_position: Optional[int] = Field(
         default=None, description="Number (1, 2, 3...) of the product they mean in PRODUCTS YOU JUST PRESENTED; "
                                   "null if it is not clear which one")
+    keep_positions: list[int] = Field(
+        default_factory=list, max_length=10,
+        description="For more_options: numbers of the presented options they want to keep; the others are "
+                    "replaced. Empty when all of them should be replaced")
     product_positions: list[int] = Field(
         default_factory=list, max_length=10, description="For compare: numbers of the products to compare; empty means all presented")
     reason: Optional[str] = Field(default=None, description="For choose/reject: why, in the shopper's words")
@@ -146,6 +157,9 @@ WHAT YOU KNOW ABOUT THIS SHOPPER (from earlier conversations)
 THEIR CART
 {cart}
 
+STILL TO LOOK FOR (other things they asked for earlier, after the current one)
+{next_up}
+
 ITEM SCOUT SUGGESTED TO GO WITH THEIR CART
 {suggestion}
 
@@ -162,7 +176,7 @@ FOR THE SHOPPER'S NEW MESSAGE
 
 1. intent: decide what the shopper is trying to achieve right now.
    - shop: they are describing, changing or narrowing down what they want, including a short reply that answers your last question.
-   - more_options: they want to hear different or additional options for the same need, without changing the need. Do not ask a question; Scout will present the next options. If they also change what they want (a price limit, a colour, a detail), it is still more_options: update the need with the change.
+   - more_options: they want to hear different or additional options for the same need, without changing the need. Do not ask a question; Scout will present the next options. If they also change what they want (a price limit, a colour, a detail), it is still more_options: update the need with the change. When they want to keep some of the presented options and replace only the others, it is still more_options: put the numbers of the ones to keep in keep_positions.
    - ask_about_product: they want one presented product described (including its look, picture or photo), or have a question about it. Scout CAN look at product photos, so this is never impossible.
    - compare: they want two or more presented products compared.
    - choose: they have decided on a product they want to buy.
@@ -191,6 +205,7 @@ FOR THE SHOPPER'S NEW MESSAGE
    product_types: the specific kind(s) they want, spelled exactly as in PRODUCT TYPES IN THE SHOP. Fill it only when their words clearly mean one of those kinds. A general word that people use for several of the shop's kinds leaves product_types empty. When they accept another kind you offered, add it.
    purpose: the occasion or use, in their words. When it points to particular kinds the shop has for that person (see "Kinds of ..." in WHAT THE SHOP ACTUALLY HAS), also put those kinds in product_types, so the search looks for the right kind.
    gender: whose STYLE the item is, and only from what the shopper says. Naming the style, or naming the person it is for, settles it; saying it does not matter means "any". Never infer it from their name, voice, way of talking, profile, or from who is talking: an item they want for themselves does NOT settle it, because anyone can shop for any style. When they move on to a different kind of product, keep the gender only if they make clear it is for the same person. When your last question asked whose style it is, a reply that names a style answers it: set gender from it, even when the reply is only a few words.
+   budget_min / budget_max: the price range they give, as a lower and an upper limit (a single limit sets only that one; a range sets both). A new limit of one kind replaces the old one of that kind.
    must_have: every specific quality they ask the product to have, in plain words a product description would use. When they ask for a different value of a quality they already gave, it replaces the old one.
 
 3. Decide whether the need is clear. Think about it like a friend would:
@@ -215,6 +230,9 @@ FOR THE SHOPPER'S NEW MESSAGE
    - Offer two or three short possible answers so it is easy to reply by voice, and put the same answers in choices so they can also tap one.
    - Write a fresh question for this shopper and this product; never a generic or stock question.
    - Respect their patience. If you have already asked 3 or more questions, offer to show options now instead of asking more.
+
+   - Several kinds of product at once: put the first in need and the others in next_up, and when you ask your question, say briefly that you will start with the first and find the others next.
+   - Moving on to something in STILL TO LOOK FOR: it was asked for together with the earlier item, so it is for the same person: keep the gender.
 
 5. Category not in the catalog: set unavailable_category, keep category null, and in your question say kindly that you do not have it yet, that you have noted their request, and name the categories you can help with.
 
@@ -277,6 +295,7 @@ class ElicitationAgentBuilder:
             last_question=state.get(state_keys.LAST_QUESTION) or "none",
             questions_asked=state.get(state_keys.QUESTIONS_ASKED, 0),
             catalog_overview=state.get(state_keys.CATALOG_OVERVIEW) or "not available",
+            next_up=", ".join(state.get(state_keys.NEXT_UP) or []) or "nothing",
             presented=_presented_products(state),
             profile=state_keys.profile(state).to_prompt_text(),
             cart=state_keys.cart(state).to_prompt_text(),
@@ -320,7 +339,10 @@ class ElicitationAgentBuilder:
         self._carry_outfit_request(state, turn)
         self._fresh_outfit_need(state, turn)
         turn.need.product_types = self._known_types(turn.need.product_types)
+        if turn.need.gender is None and turn.style_answer:   # the answer to "whose style?", asked on its own
+            turn.need.gender = turn.style_answer
         turn.need.gender = self._kept_gender(state, turn.need)
+        state[state_keys.NEXT_UP] = self._next_up(state, turn)
         message = content_text(callback_context.user_content, separator=" ")
         turn.need.avoid = self._grounded_avoid(state, turn, message)
         if self._must_ask_gender(turn, asked):
@@ -346,14 +368,23 @@ class ElicitationAgentBuilder:
 
     @staticmethod
     def _kept_gender(state, need: ShoppingNeed) -> Optional[str]:
-        """The model sometimes drops a style the shopper already gave; keep it while the category stays the same.
+        """The model sometimes drops a style the shopper already gave; keep it while the category stays the same,
+        or when they move on to something they asked for together with it (STILL TO LOOK FOR).
 
-        A new category may be for someone else, so there the model's answer stands (it asks again).
+        Any other new category may be for someone else, so there the model's answer stands (it asks again).
         """
         previous = state_keys.need(state)
-        if need.gender is None and previous.gender and previous.category == need.category:
+        asked_together = need.category in (state.get(state_keys.NEXT_UP) or [])
+        if need.gender is None and previous.gender and (previous.category == need.category or asked_together):
             return previous.gender
         return need.gender
+
+    def _next_up(self, state, turn: TurnUnderstanding) -> list[str]:
+        """What they still want to look for after the current item: kept until they move on to it."""
+        known = {c.lower(): c for c in self._catalog.categories()}
+        wanted = [*(state.get(state_keys.NEXT_UP) or []), *turn.next_up]
+        current = (turn.need.category or "").lower()
+        return list(dict.fromkeys(known[c.lower()] for c in wanted if c.lower() in known and c.lower() != current))
 
     @staticmethod
     def _forget_heard_if_need_changed(state, need: ShoppingNeed) -> None:

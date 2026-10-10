@@ -58,8 +58,7 @@ logger = logging.getLogger(__name__)
 PRODUCTS_TO_PRESENT = 3   # listeners can keep about three options in mind
 STYLIST_TIMEOUT_S = 15    # a plan normally takes a few seconds; never leave the shopper waiting longer
 SCREEN_CUES = re.compile(r"\[\[\d+\]\]")   # [[2]] tags that light up an option on screen; not words
-RECENT_TURNS_KEPT = 6       # exchanges Elicitation sees word for word (the need, cart and profile hold the rest)
-SCOUT_WORDS_KEPT = 400      # characters of each reply: enough to know what was said, small enough to stay fast
+TURNS_KEPT = 50             # exchanges kept word for word, to show the conversation again (agents see the last few)
 NOTHING_SHOWN_YET = "I haven't shown you anything yet. Tell me what you're looking for and I'll find a few options."
 
 
@@ -132,7 +131,7 @@ class ScoutOrchestrator(BaseAgent):
                 if event.content and not event.partial:
                     spoken.append(content_text(event.content))
                 yield event
-        yield self._update_state(ctx, {state_keys.RECENT_TURNS: self._recent_turns(ctx, " ".join(spoken))})
+        yield self._update_state(ctx, {state_keys.CONVERSATION: self._conversation(ctx, "\n\n".join(spoken))})
 
         # 3. Learn, after the shopper already has their answer.
         if evidence or turn.lasting_preference:
@@ -166,7 +165,7 @@ class ScoutOrchestrator(BaseAgent):
         elif turn.question:
             steps = self._just_say(ctx, turn.question)
         elif turn.intent == "more_options":
-            steps = self._more_options(ctx)
+            steps = self._more_options(ctx, turn.keep_positions)
         elif turn.intent == "ask_about_product":
             steps = self._answer_about_product(ctx, turn)
         elif turn.intent == "compare":
@@ -228,9 +227,10 @@ class ScoutOrchestrator(BaseAgent):
         async for event in self.narration.run_async(ctx):
             yield event
 
-    async def _more_options(self, ctx: InvocationContext):
+    async def _more_options(self, ctx: InvocationContext, keep_positions: list[int]):
         """Options they have not heard yet. Only ones that still fit the need: if this message tightened it
-        ("under $70"), earlier finds over the new limit are dropped and the search runs again."""
+        ("under $70"), earlier finds over the new limit are dropped and the search runs again.
+        Options they asked to keep stay in their places; only the other places get new options."""
         state = ctx.session.state
         if not state.get(state_keys.SHORTLIST):
             yield self._say(ctx, NOTHING_SHOWN_YET)
@@ -238,11 +238,14 @@ class ScoutOrchestrator(BaseAgent):
 
         need = state_keys.need(state)
         shortlist = state_keys.shortlist(state)
-        seen = list(state.get(state_keys.SEEN) or state.get(state_keys.PRESENTED) or [])
+        presented = list(state.get(state_keys.PRESENTED) or [])
+        kept = [presented[n - 1] for n in keep_positions if 1 <= n <= len(presented)]
+        wanted = PRODUCTS_TO_PRESENT - len(kept) if kept else PRODUCTS_TO_PRESENT
+        seen = list(dict.fromkeys([*(state.get(state_keys.SEEN) or []), *presented]))
         unseen = [p for p in shortlist.values() if p.id not in seen and self.retriever.fits(need, p)]
         delta: dict = {}
 
-        if len(unseen) < PRODUCTS_TO_PRESENT:        # not enough left: search again, skipping what we have
+        if len(unseen) < wanted:        # not enough left: search again, skipping what we have
             extra = await asyncio.to_thread(self.retriever.find, need, set(seen) | set(shortlist))
             new = [p for p in extra.products if self.retriever.fits(need, p)]   # never over budget to top up
             if new:
@@ -252,11 +255,18 @@ class ScoutOrchestrator(BaseAgent):
                 delta[state_keys.RELAXED] = [r for r in extra.relaxed if r != "budget"]
             delta[state_keys.OTHER_TYPES] = extra.other_types
 
-        next_ids = [p.id for p in unseen[:PRODUCTS_TO_PRESENT]]
-        if next_ids:
+        fresh = [p.id for p in unseen[:wanted]]
+        if kept:     # the kept ones stay in their places; the new ones fill the others, in order
+            queue = iter(fresh)
+            next_ids = [i for i in (pid if pid in kept else next(queue, None) for pid in presented) if i]
+            next_ids += list(queue)
+        else:
+            next_ids = fresh
+        if fresh:
             delta.update({
                 state_keys.PRESENTED: next_ids,
-                state_keys.SEEN: seen + next_ids,
+                state_keys.KEPT: kept,
+                state_keys.SEEN: seen + fresh,
                 state_keys.NARRATION_TASK: NarrationTask.MORE_OPTIONS.value,
                 state_keys.FOCUS_PRODUCT: None,
             })
@@ -625,12 +635,12 @@ class ScoutOrchestrator(BaseAgent):
             yield self._update_state(ctx, {state_keys.OFFER_OPEN: bool(kind) and kind in " ".join(spoken)})
 
     @staticmethod
-    def _recent_turns(ctx: InvocationContext, reply: str) -> list[dict]:
-        """The conversation so far, word for word but only the last few exchanges."""
-        turns = list(ctx.session.state.get(state_keys.RECENT_TURNS) or [])
+    def _conversation(ctx: InvocationContext, reply: str) -> list[dict]:
+        """The conversation so far with this exchange added, word for word (screen cues removed)."""
+        turns = state_keys.conversation(ctx.session.state)
         turns.append({"shopper": content_text(ctx.user_content, separator=" "),
-                      "scout": " ".join(SCREEN_CUES.sub(" ", reply).split())[:SCOUT_WORDS_KEPT]})
-        return turns[-RECENT_TURNS_KEPT:]
+                      "scout": SCREEN_CUES.sub("", reply).strip()})
+        return turns[-TURNS_KEPT:]
 
     @staticmethod
     def _suggestion_rules(ctx: InvocationContext) -> SuggestionRules:
