@@ -15,8 +15,14 @@ Each turn:
        choose                -> add to cart, suggest one item that goes with it, Narration confirms
        cart                  -> view / remove / checkout (with one last "you might have forgotten"), Narration
        see suggestion        -> present the suggested item with a few like it
-       outfit                -> Stylist plans the pieces for the occasion; options for one piece at a time,
-                                each matched to what was already picked; extras offered once; add it all
+       outfit                -> Stylist plans one look per day or occasion from the clothes they own, and the
+                                few new pieces worth buying, shown as a board. If they own pieces for it, the
+                                new ones are all found at once; if everything is new, they choose each piece
+                                from a few options, one at a time (guided). Then swap or skip a piece, add the
+                                new pieces to the cart, or leave. Planning is a mode: once started, every
+                                request is for the outfit (another kind of product is added to it, a price
+                                or "others" is for the piece being chosen) until the outfit is put in the
+                                cart or the shopper asks for regular shopping
        pause                 -> say nothing; the UI goes quiet and keeps listening
        end_conversation      -> a short goodbye; the UI stops listening
   3. AFTER the reply: the Preference agent learns lasting taste when there is
@@ -32,6 +38,7 @@ creates them.
 import asyncio
 import logging
 import re
+from concurrent.futures import ThreadPoolExecutor
 from typing import AsyncGenerator, Optional
 
 from google.adk.agents import BaseAgent
@@ -44,16 +51,17 @@ from scout.agents import state_keys
 from scout.agents.elicitation import TurnUnderstanding, read_turn
 from scout.agents.model_io import content_text
 from scout.agents.narration import NarrationTask
-from scout.domain import Outfit, OutfitPlan, Product, ShoppingNeed
-from scout.tools import CatalogOverviewBuilder, ProductReferenceResolver, ProductRetriever
+from scout.domain import Capsule, CapsulePlan, NewPiece, Product, ShoppingNeed
+from scout.tools import CatalogOverviewBuilder, ProductReferenceResolver, ProductRetriever, RetrievalResult
 from scout.tools.recommendations import Recommender, Suggestion, SuggestionRules
+from scout.tools.wardrobe import new_item
 
 logger = logging.getLogger(__name__)
 
 PRODUCTS_TO_PRESENT = 3   # listeners can keep about three options in mind
+STYLIST_TIMEOUT_S = 15    # a plan normally takes a few seconds; never leave the shopper waiting longer
 SCREEN_CUES = re.compile(r"\[\[\d+\]\]")   # [[2]] tags that light up an option on screen; not words
-RECENT_TURNS_KEPT = 6       # exchanges Elicitation sees word for word (the need, cart and profile hold the rest)
-SCOUT_WORDS_KEPT = 400      # characters of each reply: enough to know what was said, small enough to stay fast
+TURNS_KEPT = 50             # exchanges kept word for word, to show the conversation again (agents see the last few)
 NOTHING_SHOWN_YET = "I haven't shown you anything yet. Tell me what you're looking for and I'll find a few options."
 
 
@@ -111,10 +119,15 @@ class ScoutOrchestrator(BaseAgent):
         turn = read_turn(ctx.session.state)
         if ctx.session.state.get(state_keys.OFFER_OPEN):   # the offer was answered (or passed over) just now
             yield self._update_state(ctx, {state_keys.OFFER_OPEN: False})
-        outfit = state_keys.outfit(ctx.session.state)
-        if turn is not None and outfit is not None and turn.outfit_drop:   # pieces they don't want in it
-            outfit.drop(turn.outfit_drop)
-            yield self._update_state(ctx, {state_keys.OUTFIT: outfit.model_dump()})
+        if ctx.session.state.get(state_keys.WARDROBE_JUST_ADDED):   # Elicitation has seen the new photos now
+            yield self._update_state(ctx, {state_keys.WARDROBE_JUST_ADDED: []})
+        if turn is not None and turn.intent == "outfit" and turn.outfit_action == "start" \
+                and not state_keys.planning_outfit(ctx.session.state):
+            yield self._update_state(ctx, {state_keys.MODE: state_keys.OUTFIT_MODE})
+        if turn is not None and turn.owned_items:          # clothes they told Scout they own
+            wardrobe = state_keys.wardrobe(ctx.session.state)
+            wardrobe += [new_item(piece.category, piece.description) for piece in turn.owned_items]
+            yield self._update_state(ctx, {state_keys.WARDROBE: [item.model_dump() for item in wardrobe]})
         if turn is None:
             yield self._say(ctx, "Sorry, I didn't quite catch that. Could you say it another way?")
             return
@@ -129,7 +142,7 @@ class ScoutOrchestrator(BaseAgent):
                 if event.content and not event.partial:
                     spoken.append(content_text(event.content))
                 yield event
-        yield self._update_state(ctx, {state_keys.RECENT_TURNS: self._recent_turns(ctx, " ".join(spoken))})
+        yield self._update_state(ctx, {state_keys.CONVERSATION: self._conversation(ctx, "\n\n".join(spoken))})
 
         # 3. Learn, after the shopper already has their answer.
         if evidence or turn.lasting_preference:
@@ -138,6 +151,8 @@ class ScoutOrchestrator(BaseAgent):
                 yield event
 
     async def _route(self, ctx: InvocationContext, turn: TurnUnderstanding):
+        if state_keys.planning_outfit(ctx.session.state):
+            turn = self._as_outfit_step(ctx, turn)
         suggestion = (state_keys.suggestion(ctx.session.state, turn.suggestion_position)
                       if turn.about_suggestion else None)
         if suggestion is not None and turn.intent in ("choose", "ask_about_product", "reject"):
@@ -159,7 +174,7 @@ class ScoutOrchestrator(BaseAgent):
         elif turn.question:
             steps = self._just_say(ctx, turn.question)
         elif turn.intent == "more_options":
-            steps = self._more_options(ctx)
+            steps = self._more_options(ctx, turn.keep_positions)
         elif turn.intent == "ask_about_product":
             steps = self._answer_about_product(ctx, turn)
         elif turn.intent == "compare":
@@ -185,11 +200,12 @@ class ScoutOrchestrator(BaseAgent):
     # Steps
     # -----------------------------------------------------------------
 
-    async def _search_and_narrate(self, ctx: InvocationContext, skip_seen: bool = False,
-                                  task: Optional[NarrationTask] = None):
-        """Search for the need and present the results (as part of the outfit, while one is being planned)."""
+    async def _search_and_narrate(self, ctx: InvocationContext, skip_seen: bool = False):
+        """Search for the need and present the results."""
         state = ctx.session.state
-        task = task or (NarrationTask.OUTFIT_STEP if state.get(state_keys.OUTFIT) else NarrationTask.PRESENT_OPTIONS)
+        stopped = self._stop_choosing_piece(ctx)        # shopping for something else now
+        if stopped:
+            yield stopped
         need = state_keys.need(state)
         seen = set(state.get(state_keys.SEEN) or []) if skip_seen else set()
         result = await asyncio.to_thread(self.retriever.find, need, seen)
@@ -214,15 +230,16 @@ class ScoutOrchestrator(BaseAgent):
             state_keys.OTHER_TYPES: result.other_types,
             state_keys.PRESENTED: first,
             state_keys.SEEN: sorted(seen) + first,
-            state_keys.NARRATION_TASK: task.value,
+            state_keys.NARRATION_TASK: NarrationTask.PRESENT_OPTIONS.value,
             state_keys.FOCUS_PRODUCT: None,
         })
         async for event in self.narration.run_async(ctx):
             yield event
 
-    async def _more_options(self, ctx: InvocationContext):
+    async def _more_options(self, ctx: InvocationContext, keep_positions: list[int]):
         """Options they have not heard yet. Only ones that still fit the need: if this message tightened it
-        ("under $70"), earlier finds over the new limit are dropped and the search runs again."""
+        ("under $70"), earlier finds over the new limit are dropped and the search runs again.
+        Options they asked to keep stay in their places; only the other places get new options."""
         state = ctx.session.state
         if not state.get(state_keys.SHORTLIST):
             yield self._say(ctx, NOTHING_SHOWN_YET)
@@ -230,11 +247,14 @@ class ScoutOrchestrator(BaseAgent):
 
         need = state_keys.need(state)
         shortlist = state_keys.shortlist(state)
-        seen = list(state.get(state_keys.SEEN) or state.get(state_keys.PRESENTED) or [])
+        presented = list(state.get(state_keys.PRESENTED) or [])
+        kept = [presented[n - 1] for n in keep_positions if 1 <= n <= len(presented)]
+        wanted = PRODUCTS_TO_PRESENT - len(kept) if kept else PRODUCTS_TO_PRESENT
+        seen = list(dict.fromkeys([*(state.get(state_keys.SEEN) or []), *presented]))
         unseen = [p for p in shortlist.values() if p.id not in seen and self.retriever.fits(need, p)]
         delta: dict = {}
 
-        if len(unseen) < PRODUCTS_TO_PRESENT:        # not enough left: search again, skipping what we have
+        if len(unseen) < wanted:        # not enough left: search again, skipping what we have
             extra = await asyncio.to_thread(self.retriever.find, need, set(seen) | set(shortlist))
             new = [p for p in extra.products if self.retriever.fits(need, p)]   # never over budget to top up
             if new:
@@ -244,11 +264,18 @@ class ScoutOrchestrator(BaseAgent):
                 delta[state_keys.RELAXED] = [r for r in extra.relaxed if r != "budget"]
             delta[state_keys.OTHER_TYPES] = extra.other_types
 
-        next_ids = [p.id for p in unseen[:PRODUCTS_TO_PRESENT]]
-        if next_ids:
+        fresh = [p.id for p in unseen[:wanted]]
+        if kept:     # the kept ones stay in their places; the new ones fill the others, in order
+            queue = iter(fresh)
+            next_ids = [i for i in (pid if pid in kept else next(queue, None) for pid in presented) if i]
+            next_ids += list(queue)
+        else:
+            next_ids = fresh
+        if fresh:
             delta.update({
                 state_keys.PRESENTED: next_ids,
-                state_keys.SEEN: seen + next_ids,
+                state_keys.KEPT: kept,
+                state_keys.SEEN: seen + fresh,
                 state_keys.NARRATION_TASK: NarrationTask.MORE_OPTIONS.value,
                 state_keys.FOCUS_PRODUCT: None,
             })
@@ -304,12 +331,20 @@ class ScoutOrchestrator(BaseAgent):
             yield self._say(ctx, "Lovely! Which one would you like: the first, second or third?")
             return
 
-        outfit = state_keys.outfit(ctx.session.state)
-        if suggested is None and outfit is not None:   # planning an outfit: picks go into it, not the cart
-            outfit.pick(product)
-            yield self._evidence("chose", product, turn.reason)
-            async for item in self._outfit_step(ctx, outfit):
+        capsule = state_keys.capsule(ctx.session.state)
+        if capsule is not None and suggested is None and state_keys.planning_outfit(ctx.session.state):
+            # Planning an outfit: what they choose goes into it (the piece being chosen, else the piece of
+            # that kind, else a new piece of that kind), never into the cart.
+            piece = (capsule.new_piece(capsule.current or "") or capsule.new_piece(product.category or "")
+                     or capsule.add_piece(product.category or product.kind or "item", [], product.kind or ""))
+            capsule.choose(piece.key, product)
+            capsule.skipped = [key for key in capsule.skipped if key != piece.key]
+            following = capsule.move_on()
+            event = (f"They chose {' '.join(product.title.split()[:8])} for the {piece.category}. "
+                     + (f"Next: the {following.category}." if following else "Every piece is now settled."))
+            async for item in self._offer_options(ctx, capsule, event):
                 yield item
+            yield self._evidence("chose", product, turn.reason)
             return
 
         cart = state_keys.cart(ctx.session.state)
@@ -375,79 +410,248 @@ class ScoutOrchestrator(BaseAgent):
         async for item in self._narrate_offer(ctx, reminder):
             yield item
 
+    def _as_outfit_step(self, ctx: InvocationContext, turn: TurnUnderstanding) -> TurnUnderstanding:
+        """In outfit mode every request is a step of the outfit, decided here by kind of product, never by
+        wording: the same kind as a piece (or none named) is other options for that piece, with any new price
+        or wish; another kind is a piece to add; pointing at clothes they own is planning again with them."""
+        capsule = state_keys.capsule(ctx.session.state)
+        if capsule is None or turn.intent == "outfit" or turn.question or turn.about_suggestion:
+            return turn
+        if turn.owned_items:
+            return turn.model_copy(update={"intent": "outfit", "outfit_action": "start"})
+        if turn.intent not in ("shop", "more_options", "reject"):
+            return turn
+        category = turn.need.category
+        piece = capsule.new_piece(category) if category else capsule.new_piece(capsule.current or "")
+        wish = turn.swap_wish or turn.reason or ", ".join(turn.need.must_have) or None
+        if piece is None and category:
+            return turn.model_copy(update={"intent": "outfit", "outfit_action": "add",
+                                           "swap_piece": category, "swap_wish": wish})
+        return turn.model_copy(update={"intent": "outfit", "outfit_action": "swap",
+                                       "swap_piece": piece.category if piece else None, "swap_wish": wish})
+
     async def _outfit(self, ctx: InvocationContext, turn: TurnUnderstanding):
-        """Styling an outfit: start one, or steer the one in progress."""
-        outfit = state_keys.outfit(ctx.session.state)
+        """Planning an outfit: plan (or plan again), other options for a piece, skip or add a piece, put the new
+        pieces in the cart (the outfit is finished), or leave for regular shopping."""
+        capsule = state_keys.capsule(ctx.session.state)
         action = turn.outfit_action
         if action == "start":
-            yield self._update_state(ctx, {state_keys.STYLIST_PLAN: None})   # never reuse an older plan
-            async for event in self._silently(self.stylist, ctx):
-                yield event
-            raw = ctx.session.state.get(state_keys.STYLIST_PLAN)
-            plan = OutfitPlan.model_validate(raw) if raw else None
-            if plan is None or not plan.pieces:
-                yield self._say(ctx, "I couldn't put an outfit together for that from what the shop has. "
-                                     "Could you tell me a bit more about the occasion?")
-                return
-            outfit = Outfit.start(plan, state_keys.need(ctx.session.state).budget_max)
-        elif outfit is None:
-            yield self._say(ctx, "We don't have an outfit going right now. Tell me the occasion and I'll help "
-                                 "you put one together.")
-            return
-        elif action == "add_to_cart":
-            async for item in self._add_outfit_to_cart(ctx, outfit):
-                yield item
-            return
+            steps = self._plan_capsule(ctx, capsule)
         elif action == "leave":
-            yield self._update_state(ctx, {state_keys.OUTFIT: None})
-            yield self._say(ctx, "Sure, we'll leave the outfit there. What would you like to shop for?")
-            return
-        elif action == "skip" and outfit.current() is not None:
-            outfit.skip_current()
-        elif action == "add_extra":
-            outfit.accept_extra()
-        elif action in ("skip", "finish"):   # "no" to the extra on offer
-            outfit.decline_extra()
-        async for item in self._outfit_step(ctx, outfit):
+            steps = self._leave_capsule(ctx)
+        elif capsule is None:
+            steps = self._just_say(ctx, "We haven't planned an outfit yet. Tell me the occasion, and I'll plan "
+                                        "it with you.")
+        elif action == "swap":
+            steps = self._swap_piece(ctx, capsule, turn)
+        elif action == "skip":
+            steps = self._skip_piece(ctx, capsule, turn)
+        elif action == "add":
+            steps = self._add_piece(ctx, capsule, turn)
+        elif action == "add_to_cart":
+            steps = self._add_capsule_to_cart(ctx, capsule)
+        else:
+            steps = self._narrate_capsule(ctx, capsule, turn.understood or "They asked about the plan.")
+        async for item in steps:
             yield item
 
-    async def _outfit_step(self, ctx: InvocationContext, outfit: Outfit):
-        """Options for the next piece to choose; once every piece is picked, the whole outfit and one offer."""
-        need = outfit.need_for_current(state_keys.need(ctx.session.state))
-        if need is None and not outfit.chosen():   # every piece skipped
-            yield self._update_state(ctx, {state_keys.OUTFIT: None})
-            yield self._say(ctx, "No problem, we've skipped every piece. Shall we try a different kind of outfit?")
-            return
-        if need is None:
-            outfit.offer_extra()
-            yield self._update_state(ctx, {state_keys.OUTFIT: outfit.model_dump(),
-                                           state_keys.NARRATION_TASK: NarrationTask.OUTFIT_DONE.value})
-            async for event in self.narration.run_async(ctx):
-                yield event
-            return
-        yield self._update_state(ctx, {state_keys.OUTFIT: outfit.model_dump(), state_keys.NEED: need.model_dump(),
-                                       state_keys.SUGGESTION: None})
-        async for event in self._search_and_narrate(ctx, task=NarrationTask.OUTFIT_STEP):
+    async def _plan_capsule(self, ctx: InvocationContext, earlier: Optional[Capsule]):
+        """The Stylist plans the looks; then the new pieces are found in the shop. Planning again keeps the
+        pieces already chosen. Planning takes a few seconds, so Scout says straight away that it is on it."""
+        yield self._update_state(ctx, {state_keys.STYLIST_PLAN: None})   # never reuse an older plan
+        own = " from your wardrobe" if state_keys.wardrobe(ctx.session.state) else ""
+        yield self._say(ctx, f"Lovely! Give me a few seconds while I plan your looks{own}.")
+        try:
+            events = await asyncio.wait_for(self._collect(self._silently(self.stylist, ctx)), STYLIST_TIMEOUT_S)
+        except asyncio.TimeoutError:
+            logger.warning("The Stylist took longer than %ss", STYLIST_TIMEOUT_S)
+            events = []
+        for event in events:
             yield event
-        if not outfit.introduced:            # the plan is shared once, with the first piece
-            outfit.introduced = True
-            yield self._update_state(ctx, {state_keys.OUTFIT: outfit.model_dump()})
+        raw = ctx.session.state.get(state_keys.STYLIST_PLAN)
+        plan = CapsulePlan.model_validate(raw) if raw else None
+        if plan is None or not plan.looks:
+            yield self._say(ctx, "Sorry, I couldn't finish the plan just now. Shall I try again? You can also "
+                                 "tell me a little more about the occasion.")
+            return
+        need = state_keys.need(ctx.session.state)
+        owns_some = any(piece.owned for look in plan.looks for piece in look.pieces)
+        # The plan keeps the words for their own pieces, not the pictures (those stay in their wardrobe).
+        wardrobe = [item.model_copy(update={"thumbnail": None}) for item in state_keys.wardrobe(ctx.session.state)]
+        capsule = Capsule(plan=plan, wardrobe=wardrobe, budget=need.budget_max, guided=not owns_some)
+        if earlier is not None:
+            capsule.keep_choices_from(earlier)
+        if capsule.guided:                           # all new: they choose each piece, starting with the first
+            capsule.move_on()
+            steps = self._offer_options(ctx, capsule, state_keys.CAPSULE_PLANNED)
+        else:                                        # the best match for every new piece, all at once
+            still_open = [p for p in plan.new_pieces if p.key not in capsule.picks]
+            await asyncio.to_thread(self._find_pieces, capsule, need, still_open)
+            yield self._update_state(ctx, {state_keys.PRESENTED: [], state_keys.FOCUS_PRODUCT: None})  # old cards
+            steps = self._narrate_capsule(ctx, capsule, state_keys.CAPSULE_PLANNED)
+        async for item in steps:
+            yield item
 
-    async def _add_outfit_to_cart(self, ctx: InvocationContext, outfit: Outfit):
-        chosen = outfit.chosen()
-        if not chosen:
-            yield self._say(ctx, "We haven't picked any pieces yet. Shall we start with the first one?")
+    async def _swap_piece(self, ctx: InvocationContext, capsule: Capsule, turn: TurnUnderstanding):
+        """Other options for one piece, to choose from (what was chosen for it stays until they choose again)."""
+        piece = self._piece_meant(capsule, turn)
+        if piece is None:
+            yield self._which_piece(ctx, capsule)
+            return
+        self._limit_price(ctx, capsule, piece)
+        capsule.skipped = [key for key in capsule.skipped if key != piece.key]
+        capsule.current = piece.key
+        wish = f" ({turn.swap_wish})" if turn.swap_wish else ""
+        async for item in self._offer_options(ctx, capsule, f"They asked for other {piece.category} options{wish}.",
+                                              turn.swap_wish or ""):
+            yield item
+
+    async def _add_piece(self, ctx: InvocationContext, capsule: Capsule, turn: TurnUnderstanding):
+        """Another kind of piece in the outfit (shoes, a bag...), with options to choose from."""
+        need = state_keys.need(ctx.session.state)
+        category = turn.swap_piece or need.category
+        if not category:
+            yield self._say(ctx, "Sure! What would you like to add to the outfit?")
+            return
+        piece = capsule.new_piece(category)
+        if piece is None:
+            kinds = need.product_types if (need.category or "").lower() == category.lower() else []
+            piece = capsule.add_piece(category, kinds, turn.swap_wish or "")
+        capsule.skipped = [key for key in capsule.skipped if key != piece.key]
+        capsule.current = piece.key
+        self._limit_price(ctx, capsule, piece)
+        async for item in self._offer_options(ctx, capsule, f"They asked to add a {piece.category} to the outfit.",
+                                              turn.swap_wish or ""):
+            yield item
+
+    async def _skip_piece(self, ctx: InvocationContext, capsule: Capsule, turn: TurnUnderstanding):
+        piece = self._piece_meant(capsule, turn)
+        if piece is None:
+            yield self._which_piece(ctx, capsule)
+            return
+        capsule.picks.pop(piece.key, None)
+        capsule.skip(piece.key)
+        event = f"They do not want the {piece.category}, so it is left out."
+        if capsule.guided or capsule.current == piece.key:
+            following = capsule.move_on()
+            event += f" Next: the {following.category}." if following else " Every piece is now settled."
+            steps = self._offer_options(ctx, capsule, event)
+        else:
+            steps = self._narrate_capsule(ctx, capsule, event)
+        async for item in steps:
+            yield item
+
+    @staticmethod
+    def _limit_price(ctx: InvocationContext, capsule: Capsule, piece: NewPiece) -> None:
+        """A price they gave while choosing a piece is for that piece alone, not the whole outfit."""
+        need = state_keys.need(ctx.session.state)
+        if need.budget_min is not None or (need.budget_max is not None and need.budget_max != capsule.budget):
+            capsule.price_limits[piece.key] = (need.budget_min, need.budget_max)
+
+    def _stop_choosing_piece(self, ctx: InvocationContext) -> Optional[Event]:
+        """The shopper moved on to regular shopping while choosing an outfit piece: the plan stays on the board
+        (the piece can be chosen later), but new options and picks are no longer for the outfit."""
+        capsule = state_keys.capsule(ctx.session.state)
+        if capsule is None or capsule.current is None:
+            return None
+        capsule.current = None
+        return self._update_state(ctx, {state_keys.CAPSULE: capsule.model_dump()})
+
+    @staticmethod
+    def _piece_meant(capsule: Capsule, turn: TurnUnderstanding) -> Optional[NewPiece]:
+        """The new piece they mean: the one they named, else the one being chosen, else the only one."""
+        pieces = capsule.plan.new_pieces
+        return (capsule.new_piece(turn.swap_piece or "") or capsule.new_piece(capsule.current or "")
+                or (pieces[0] if len(pieces) == 1 else None))
+
+    def _which_piece(self, ctx: InvocationContext, capsule: Capsule) -> Event:
+        names = " or the ".join(p.category for p in capsule.plan.new_pieces)
+        return self._say(ctx, f"Which piece do you mean: the {names}?" if names else
+                         "This plan doesn't need anything new: you already own every piece!")
+
+    async def _offer_options(self, ctx: InvocationContext, capsule: Capsule, event: str, wish: str = ""):
+        """A few options for the piece being chosen now (none once every piece is settled). The shopping need
+        becomes that piece, so the next "cheaper" or "in black" is about it."""
+        piece = capsule.new_piece(capsule.current or "")
+        base = state_keys.need(ctx.session.state)
+        current = base.model_copy(update={"category": piece.category if piece else None,
+                                          "product_types": piece.product_types if piece else [],
+                                          "looking_for": piece.looks_like if piece else "", "must_have": [],
+                                          "budget_min": None, "budget_max": capsule.budget})
+        delta: dict = {state_keys.PRESENTED: [], state_keys.FOCUS_PRODUCT: None, state_keys.NEED: current.model_dump()}
+        if piece is not None:
+            need = capsule.need_for(piece, base, wish)
+            result = await asyncio.to_thread(self._search_piece, need, set(capsule.shown.get(piece.key, [])))
+            options = result.products[:PRODUCTS_TO_PRESENT]
+            capsule.offer(piece.key, [p.id for p in options])
+            delta.update({
+                state_keys.SHORTLIST: [p.model_dump() for p in result.products],
+                state_keys.EXACT_MATCHES: result.exact_ids,
+                state_keys.RELAXED: result.relaxed,
+                state_keys.OTHER_TYPES: result.other_types,
+                state_keys.PRESENTED: [p.id for p in options],
+                state_keys.SEEN: [p.id for p in options],
+            })
+        yield self._update_state(ctx, delta)
+        async for item in self._narrate_capsule(ctx, capsule, event):
+            yield item
+
+    def _find_pieces(self, capsule: Capsule, need: ShoppingNeed, pieces: list[NewPiece], wish: str = "") -> None:
+        """Find a product for each piece (all at once), never one already offered for it. Within budget when
+        possible; otherwise the nearest the shop has, which the plan's total makes plain."""
+        def best(piece: NewPiece) -> Optional[Product]:
+            piece_need = capsule.need_for(piece, need, wish)
+            found = self._search_piece(piece_need, set(capsule.shown.get(piece.key, []))).products
+            return next((p for p in found if self.retriever.fits(piece_need, p)), found[0] if found else None)
+
+        if not pieces:
+            return
+        with ThreadPoolExecutor(max_workers=len(pieces)) as pool:
+            for piece, product in zip(pieces, pool.map(best, pieces)):
+                if product is not None:
+                    capsule.choose(piece.key, product)
+
+    def _search_piece(self, need: ShoppingNeed, exclude: set[str]) -> RetrievalResult:
+        """Search for an outfit piece. The Stylist may name kinds the shop has few of; if none fit, any
+        product of that category is better than nothing."""
+        result = self.retriever.find(need, exclude)
+        if not result.found and need.product_types:
+            result = self.retriever.find(need.model_copy(update={"product_types": []}), exclude)
+        return result
+
+    async def _narrate_capsule(self, ctx: InvocationContext, capsule: Capsule, event: str):
+        yield self._update_state(ctx, {state_keys.CAPSULE: capsule.model_dump(), state_keys.CAPSULE_EVENT: event,
+                                       state_keys.SUGGESTION: None,
+                                       state_keys.NARRATION_TASK: NarrationTask.CAPSULE.value})
+        async for item in self.narration.run_async(ctx):
+            yield item
+
+    async def _add_capsule_to_cart(self, ctx: InvocationContext, capsule: Capsule):
+        """The new pieces go in the cart and the outfit is finished: back to regular shopping. The board stays,
+        so they can still try the looks on."""
+        products = capsule.products_to_buy()
+        if not products:
+            yield self._say(ctx, "Good news: this plan doesn't need anything new. You already own every piece!")
             return
         cart = state_keys.cart(ctx.session.state)
-        added = [product.title for product in chosen if cart.add(product)]
+        added = [product.title for product in products if cart.add(product)]
+        capsule.current = None
         yield self._update_state(ctx, {
             state_keys.CART: cart.model_dump(),
-            state_keys.CART_EVENT: {"action": "added" if added else "already_in_cart", "items": added},
+            state_keys.CART_EVENT: {"action": "added" if added else "already_in_cart", "items": added,
+                                    "outfit_finished": True},
             state_keys.NARRATION_TASK: NarrationTask.CART_UPDATE.value,
-            state_keys.OUTFIT: None,             # done: it is in the cart now
+            state_keys.SUGGESTION: None,
+            state_keys.CAPSULE: capsule.model_dump(),
+            state_keys.PRESENTED: [],
+            state_keys.MODE: None,
         })
         async for event in self.narration.run_async(ctx):
             yield event
+
+    async def _leave_capsule(self, ctx: InvocationContext):
+        yield self._update_state(ctx, {state_keys.CAPSULE: None, state_keys.PRESENTED: [], state_keys.MODE: None})
+        yield self._say(ctx, "Sure, we'll leave the plan there. What would you like to shop for?")
 
     async def _decline_suggestion(self, ctx: InvocationContext, turn: TurnUnderstanding, product: Product):
         """No thanks: no new search, no pressure. Declining the reminder at checkout means "check me out"."""
@@ -470,6 +674,9 @@ class ScoutOrchestrator(BaseAgent):
             return
         product = suggestion.product
         previous = state_keys.need(state)
+        stopped = self._stop_choosing_piece(ctx)
+        if stopped:
+            yield stopped
         need = ShoppingNeed(
             category=product.category,
             product_types=[product.product_type] if product.product_type else [],
@@ -511,12 +718,12 @@ class ScoutOrchestrator(BaseAgent):
             yield self._update_state(ctx, {state_keys.OFFER_OPEN: bool(kind) and kind in " ".join(spoken)})
 
     @staticmethod
-    def _recent_turns(ctx: InvocationContext, reply: str) -> list[dict]:
-        """The conversation so far, word for word but only the last few exchanges."""
-        turns = list(ctx.session.state.get(state_keys.RECENT_TURNS) or [])
+    def _conversation(ctx: InvocationContext, reply: str) -> list[dict]:
+        """The conversation so far with this exchange added, word for word (screen cues removed)."""
+        turns = state_keys.conversation(ctx.session.state)
         turns.append({"shopper": content_text(ctx.user_content, separator=" "),
-                      "scout": " ".join(SCREEN_CUES.sub(" ", reply).split())[:SCOUT_WORDS_KEPT]})
-        return turns[-RECENT_TURNS_KEPT:]
+                      "scout": SCREEN_CUES.sub("", reply).strip()})
+        return turns[-TURNS_KEPT:]
 
     @staticmethod
     def _suggestion_rules(ctx: InvocationContext) -> SuggestionRules:
@@ -624,6 +831,10 @@ class ScoutOrchestrator(BaseAgent):
         except Exception as error:
             logger.warning("Catalog overview skipped: %s", error)
             return None
+
+    @staticmethod
+    async def _collect(events: AsyncGenerator[Event, None]) -> list[Event]:
+        return [event async for event in events]
 
     @staticmethod
     async def _silently(agent: BaseAgent, ctx: InvocationContext) -> AsyncGenerator[Event, None]:

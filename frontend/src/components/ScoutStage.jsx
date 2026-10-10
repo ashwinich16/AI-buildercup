@@ -50,9 +50,16 @@ export function Orb({ state, active, ready, supported, onToggle, small = false }
 }
 
 // `starters`: the shop's categories, so a new shopper can start with one press (they can also just talk).
-export default function ScoutStage({ messages, busy, speaking, paused, ready, voiceInput, heard = "", empty, starters = [], onToggleListening, onAsk }) {
+// `choices`: short answers to Scout's question; tap one or more, then send (or just say them).
+export default function ScoutStage({
+  messages, busy, speaking, paused, ready, voiceInput, heard = "", empty, starters = [], choices = [], showHistory = false,
+  planningOutfit = false, onToggleListening, onAsk,
+}) {
   const state = scoutState({ ready, voiceInput, busy, speaking, paused });
   const [historyOpen, setHistoryOpen] = useState(false);
+  useEffect(() => {
+    if (showHistory) setHistoryOpen(true);   // carrying on a conversation: show what was said
+  }, [showHistory]);
 
   const last = messages[messages.length - 1];
   const lastScout = [...messages].reverse().find((m) => m.role === "scout");
@@ -78,6 +85,14 @@ export default function ScoutStage({ messages, busy, speaking, paused, ready, vo
           onToggle={onToggleListening}
         />
         <p className="stage__status">{state.status}</p>
+        {planningOutfit && (
+          <p className="stage__mode">
+            <span className="stage__mode-label">Planning an outfit</span>
+            <button className="link-button" disabled={busy} onClick={() => onAsk("Let's leave the outfit and do regular shopping")}>
+              Back to regular shopping
+            </button>
+          </p>
+        )}
         {!voiceInput.supported && (
           <p className="notice">Voice conversation needs Chrome, Edge or Safari. You can type below.</p>
         )}
@@ -100,11 +115,12 @@ export default function ScoutStage({ messages, busy, speaking, paused, ready, vo
         ) : (
           lastScout && <p className="stage__scout">{lastScout.text}</p>
         )}
+        {choices.length > 0 && <Choices key={choices.join("|")} choices={choices} busy={busy} onAsk={onAsk} />}
 
-        {empty && (
+        {empty && !planningOutfit && (
           <div className="stage__ways" role="group" aria-label="How would you like to shop?">
-            <button className="button" disabled={busy || !ready} onClick={() => onAsk("I'd like to plan an outfit")}>
-              Plan an outfit
+            <button className="button" disabled={busy || !ready} onClick={() => onAsk("I'd like to plan my outfit")}>
+              Plan my outfit
             </button>
             <button
               className="button button--secondary"
@@ -135,6 +151,31 @@ export default function ScoutStage({ messages, busy, speaking, paused, ready, vo
           </button>
           {historyOpen && <Conversation messages={messages} busy={busy} />}
         </div>
+      )}
+    </div>
+  );
+}
+
+function Choices({ choices, busy, onAsk }) {
+  const [picked, setPicked] = useState([]);
+  const toggle = (choice) =>
+    setPicked((all) => (all.includes(choice) ? all.filter((c) => c !== choice) : [...all, choice]));
+
+  return (
+    <div className="stage__choices" role="group" aria-label="Quick answers">
+      <ul className="chips" role="list">
+        {choices.map((choice) => (
+          <li key={choice}>
+            <button className="chip" aria-pressed={picked.includes(choice)} disabled={busy} onClick={() => toggle(choice)}>
+              {choice}
+            </button>
+          </li>
+        ))}
+      </ul>
+      {picked.length > 0 && (
+        <button className="button button--small" disabled={busy} onClick={() => onAsk(picked.join(", "))}>
+          Send
+        </button>
       )}
     </div>
   );

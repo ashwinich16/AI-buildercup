@@ -31,6 +31,7 @@ class ShoppingNeed(BaseModel):
                     "Only from what the shopper said, never guessed from who is talking; null if not said")
     looking_for: str = Field(default="", description="What they want, in their own words")
     purpose: Optional[str] = Field(default=None, description="Occasion or use, if given")
+    budget_min: Optional[float] = Field(default=None, description="Lower price limit in dollars, if given")
     budget_max: Optional[float] = Field(default=None, description="Upper price limit in dollars, if given")
     must_have: list[str] = Field(default_factory=list, max_length=MAX_LIST_ITEMS, description="Features they need, in plain words a product description would use")
     avoid: list[str] = Field(default_factory=list, max_length=MAX_LIST_ITEMS, description="Qualities they do not want, in plain words a product description would use")
@@ -54,7 +55,11 @@ class ShoppingNeed(BaseModel):
             parts.append(f"for {self.purpose}")
         if self.must_have:
             parts.append("with " + ", ".join(self.must_have))
-        if self.budget_max is not None:
+        if self.budget_min is not None and self.budget_max is not None:
+            parts.append(f"between ${self.budget_min:g} and ${self.budget_max:g}")
+        elif self.budget_min is not None:
+            parts.append(f"over ${self.budget_min:g}")
+        elif self.budget_max is not None:
             parts.append(f"under ${self.budget_max:g}")
         if self.avoid:
             parts.append("avoiding " + ", ".join(self.avoid))

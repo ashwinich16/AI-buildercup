@@ -8,5 +8,8 @@ export default defineConfig({
   server: {
     port: 5173,
     proxy: { "/api": "http://localhost:8000" },
+    // Testing on a phone before deploying: the microphone needs HTTPS, so open the dev server through
+    // an HTTPS tunnel (see README, "Test on your phone"). These are the tunnel addresses it may use.
+    allowedHosts: [".trycloudflare.com", ".ngrok-free.app"],
   },
 });

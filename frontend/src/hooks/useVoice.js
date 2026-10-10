@@ -43,14 +43,16 @@ function looksLikeEcho(heard, spokenText, threshold = 0.6) {
 // recogniser late; later than that, it is the shopper answering.
 const ECHO_TAIL_MS = 1200;
 
-// The browser splits speech into pieces at every short pause. Pieces are joined into one sentence, which
-// is sent only once the shopper has been quiet this long, so Scout hears the whole thing at once.
-const END_OF_SENTENCE_MS = 1100;
+// The browser splits speech into pieces at every short pause (it decides that itself, after about half a
+// second to a second). Pieces are joined into one sentence, which is sent only once the shopper has been
+// quiet this much longer, so Scout hears the whole thing at once. "More time to speak" waits longer.
+export const END_OF_SENTENCE_MS = 1600;
+export const END_OF_SENTENCE_SLOW_MS = 2500;
 
 // Listening: the browser's speech recognition, kept open for the whole conversation
 // (no start-up delay between turns). It restarts itself if the browser closes it.
 // `language` is the shopper's accent/language, e.g. "en-IN", "hi-IN".
-export function useSpeechInput({ language, onInterim, onFinal }) {
+export function useSpeechInput({ language, pauseMs = END_OF_SENTENCE_MS, onInterim, onFinal }) {
   const Recognition =
     typeof window !== "undefined" && (window.SpeechRecognition || window.webkitSpeechRecognition);
   const [active, setActive] = useState(false); // the shopper wants Scout to listen
@@ -66,6 +68,8 @@ export function useSpeechInput({ language, onInterim, onFinal }) {
   const launchRef = useRef(null);
   const languageRef = useRef(language);
   languageRef.current = language;
+  const pauseRef = useRef(pauseMs);
+  pauseRef.current = pauseMs;
   const handlers = useRef({});
   handlers.current = { onInterim, onFinal };
 
@@ -106,7 +110,7 @@ export function useSpeechInput({ language, onInterim, onFinal }) {
         utteranceStartRef.current ??= Date.now();
         handlers.current.onInterim?.(heardSoFar, sentenceRef.current.startedAt ?? utteranceStartRef.current);
       } else if (sentenceRef.current.text) {
-        sentenceTimerRef.current = setTimeout(finishSentence, END_OF_SENTENCE_MS);
+        sentenceTimerRef.current = setTimeout(finishSentence, pauseRef.current);
       }
     };
     recognition.onerror = (event) => {

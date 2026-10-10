@@ -2,11 +2,16 @@
 Scout web API (FastAPI). Serves the React app and these endpoints:
 
   GET  /api/auth-config     how the frontend signs in (demo personas or Firebase settings)
-  POST /api/sessions        start a conversation; returns Scout's opening words
+  POST /api/sessions        carry on the shopper's last conversation (with what was said), or start a new one
+                            ({"fresh": true}); returns Scout's opening words
+  DELETE /api/sessions/{id} clear a conversation (the shopper's name, preferences, cart and wardrobe are kept)
   POST /api/chat/stream     send a message; Scout's reply streams back as it is written, then what
                             to show (newline-delimited JSON)
   POST /api/speech          Scout's reply as natural speech (MP3)
   POST /api/try-on          the shopper's photo wearing the chosen products (PNG); the photo is never stored
+  POST /api/wardrobe        add the pieces they own in a photo (only a small thumbnail is kept); the chat
+                            sends each photo as soon as it is attached, so it is read before they press send
+  DELETE /api/wardrobe/{id} take a piece out of their wardrobe
 
 The shopper (id and name) always comes from the Authenticator, never from the
 request body, so one shopper can never read or change another shopper's
@@ -40,6 +45,7 @@ from scout.catalog import SearchQuery
 from scout.config import Settings, get_settings
 from scout.tools import ImageFetcher
 from scout.tools.try_on import TryOnError, TryOnStudio
+from scout.tools.wardrobe import WardrobeTagger
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -54,6 +60,7 @@ class ChatRequest(BaseModel):
 
 class StartRequest(BaseModel):
     preferred_name: str = Field(default="", max_length=40)   # "What should Scout call you?" (optional)
+    fresh: bool = False          # start a new conversation instead of carrying on the last one ("New chat")
 
 
 class SpeechRequest(BaseModel):
@@ -63,9 +70,17 @@ class SpeechRequest(BaseModel):
 
 class TryOnRequest(BaseModel):
     session_id: str
-    product_ids: list[str] = Field(min_length=1, max_length=4)   # one product, or the pieces of an outfit
+    product_ids: list[str] = Field(default_factory=list, max_length=4)   # one product, or an outfit's new pieces
+    wardrobe_ids: list[str] = Field(default_factory=list, max_length=4)  # their own pieces in that look
     photo: str                                                   # the shopper's photo, base64
     mime_type: str = Field(default="image/jpeg", pattern=r"^image/(jpeg|png)$")   # what the model accepts
+
+
+class WardrobePhotoRequest(BaseModel):
+    session_id: str
+    photo: str                                   # the piece of clothing, base64
+    mime_type: str = Field(default="image/jpeg", pattern=r"^image/(jpeg|png|webp)$")
+    thumbnail: str = Field(default="", max_length=300_000)   # data URL made by the browser: shown, and tried on
 
 
 MAX_PHOTO_BYTES = 10 * 1024 * 1024   # Vertex AI Virtual Try-On's input limit
@@ -81,10 +96,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     settings = settings or get_settings()
     catalog = build_catalog(settings)
     root = build_root_agent(settings, catalog)
-    chat = ScoutChatService(root, build_shopper_repository(settings))
+    store = build_shopper_repository(settings)          # the shopper's memory and the conversation summaries
+    chat = ScoutChatService(root, store, store)
     auth = build_authenticator(settings)
     speech = SpeechSynthesizer(settings.tts_voice)
     studio = TryOnStudio(settings, ImageFetcher())
+    tagger = WardrobeTagger(settings, catalog)
     personas = load_personas()
 
     # Warm every cloud connection at start-up and keep it warm, so no shopper waits for a cold start.
@@ -115,12 +132,20 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         try:
             started = await chat.start_session(shopper.id, shopper.first_name,
                                                persona.preferences if persona else None,
-                                               preferred_name=body.preferred_name.strip())
+                                               preferred_name=body.preferred_name.strip(), fresh=body.fresh)
             return started.model_copy(update={"categories": await asyncio.to_thread(catalog.categories)})
         except Exception:
             logger.exception("Could not start a conversation for %s", shopper.id)
             raise HTTPException(status_code=503, detail="I can't reach your saved cart and preferences "
                                                         "right now. Please try again in a moment.")
+
+    @app.delete("/api/sessions/{session_id}")
+    async def end_session(session_id: str, shopper: Shopper = Depends(current_shopper)) -> dict:
+        try:
+            await chat.end_session(shopper.id, session_id)
+        except LookupError:
+            pass                                   # already gone: nothing to clear
+        return {"cleared": True}
 
     @app.post("/api/chat/stream")
     async def stream_message(body: ChatRequest, shopper: Shopper = Depends(current_shopper)) -> StreamingResponse:
@@ -148,20 +173,52 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     async def try_on(body: TryOnRequest, shopper: Shopper = Depends(current_shopper)) -> Response:
         try:
             products = await chat.products(shopper.id, body.session_id, body.product_ids)
+            owned = await chat.wardrobe_items(shopper.id, body.session_id, body.wardrobe_ids)
             photo = base64.b64decode(body.photo, validate=True)
         except LookupError:
             raise HTTPException(status_code=404, detail="Conversation not found. Please start again.")
         except binascii.Error:
             raise HTTPException(status_code=400, detail="That photo couldn't be read.")
-        if not products:
+        if not products and not owned:
             raise HTTPException(status_code=404, detail="I can't find those items in our conversation.")
         if len(photo) > MAX_PHOTO_BYTES:
             raise HTTPException(status_code=413, detail="That photo is too large. Please use one under 10 MB.")
         try:
-            image = await asyncio.to_thread(studio.dress, photo, body.mime_type, products)
+            image = await asyncio.to_thread(studio.dress, photo, body.mime_type, products, owned)
         except TryOnError as error:
             raise HTTPException(status_code=422, detail=str(error))
         return Response(content=image, media_type="image/png")
+
+    @app.post("/api/wardrobe")
+    async def add_to_wardrobe(body: WardrobePhotoRequest, shopper: Shopper = Depends(current_shopper)) -> dict:
+        try:
+            await chat.ensure_session(shopper.id, body.session_id)
+            photo = base64.b64decode(body.photo, validate=True)
+        except LookupError:
+            raise HTTPException(status_code=404, detail="Conversation not found. Please start again.")
+        except binascii.Error:
+            raise HTTPException(status_code=400, detail="That photo couldn't be read.")
+        if len(photo) > MAX_PHOTO_BYTES:
+            raise HTTPException(status_code=413, detail="That photo is too large. Please use one under 10 MB.")
+        try:
+            items = await asyncio.to_thread(tagger.from_photo, photo, body.mime_type, body.thumbnail or None)
+        except Exception:
+            logger.exception("Could not read a wardrobe photo for %s", shopper.id)
+            items = []
+        if not items:
+            raise HTTPException(status_code=422, detail="I couldn't make out any clothes in that photo. "
+                                                        "Could you try a clearer one?")
+        wardrobe = await chat.add_to_wardrobe(shopper.id, body.session_id, items)
+        return {"wardrobe": [i.model_dump() for i in wardrobe], "added": [i.model_dump() for i in items]}
+
+    @app.delete("/api/wardrobe/{item_id}")
+    async def remove_from_wardrobe(item_id: str, session_id: str,
+                                   shopper: Shopper = Depends(current_shopper)) -> list[dict]:
+        try:
+            wardrobe = await chat.remove_from_wardrobe(shopper.id, session_id, item_id)
+        except LookupError:
+            raise HTTPException(status_code=404, detail="Conversation not found. Please start again.")
+        return [i.model_dump() for i in wardrobe]
 
     if FRONTEND_DIST.exists():               # the built React app, served from the same Cloud Run service
         app.mount("/", StaticFiles(directory=FRONTEND_DIST, html=True), name="frontend")

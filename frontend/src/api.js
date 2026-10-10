@@ -41,8 +41,11 @@ async function request(path, { method = "GET", body } = {}) {
 
 export const api = {
   authConfig: async () => (await request("/api/auth-config")).json(),
-  startSession: async (preferredName = "") =>
-    (await request("/api/sessions", { method: "POST", body: { preferred_name: preferredName } })).json(),
+  // Carries on the shopper's last conversation (returns its `history`), unless `fresh` asks for a new one.
+  startSession: async (preferredName = "", fresh = false) =>
+    (await request("/api/sessions", { method: "POST", body: { preferred_name: preferredName, fresh } })).json(),
+  endSession: async (sessionId) =>
+    (await request(`/api/sessions/${encodeURIComponent(sessionId)}`, { method: "DELETE" })).json(),
   // Scout's reply as it is written: onEvent gets {type: "delta" | "screen" | "done"} items.
   // Resolves with the final "done" item.
   chatStream: async (sessionId, message, onEvent) => {
@@ -69,13 +72,63 @@ export const api = {
     return done;
   },
   // The shopper's photo ({ data: base64, mimeType }) wearing the products: resolves with a PNG blob.
-  tryOn: async (sessionId, productIds, photo) =>
+  // `request`: { productIds, wardrobeIds } — products from the shop, and pieces they own (for a planned look).
+  tryOn: async (sessionId, request, photo) =>
     (
       await request("/api/try-on", {
         method: "POST",
-        body: { session_id: sessionId, product_ids: productIds, photo: photo.data, mime_type: photo.mimeType },
+        body: {
+          session_id: sessionId,
+          product_ids: request.productIds || [],
+          wardrobe_ids: request.wardrobeIds || [],
+          photo: photo.data,
+          mime_type: photo.mimeType,
+        },
       })
     ).blob(),
+  // Clothes they own, from a photo file: made small here (quick to send), then read by Scout.
+  // Resolves with { wardrobe, added }.
+  addToWardrobe: async (sessionId, file) => {
+    const image = await loadImage(file);
+    const photo = resized(image, PHOTO_SIZE).split(",")[1];
+    const body = { session_id: sessionId, photo, mime_type: "image/jpeg", thumbnail: resized(image, THUMBNAIL_SIZE) };
+    return (await request("/api/wardrobe", { method: "POST", body })).json();
+  },
+  removeFromWardrobe: async (sessionId, itemId) =>
+    (
+      await request(`/api/wardrobe/${encodeURIComponent(itemId)}?session_id=${encodeURIComponent(sessionId)}`, {
+        method: "DELETE",
+      })
+    ).json(),
   speech: async (text, rate) =>
     (await request("/api/speech", { method: "POST", body: { text, rate } })).blob(),
 };
+
+const PHOTO_SIZE = 768;     // longest side of a wardrobe photo sent to be read: plenty for Gemini, quick to upload
+const THUMBNAIL_SIZE = 512; // longest side of the picture kept of the piece: shown on the board and tried on
+
+function loadImage(file) {
+  return new Promise((resolve, reject) => {
+    const url = URL.createObjectURL(file);
+    const image = new Image();
+    image.onload = () => {
+      URL.revokeObjectURL(url);
+      resolve(image);
+    };
+    image.onerror = () => {
+      URL.revokeObjectURL(url);
+      reject(new Error("That photo couldn't be opened."));
+    };
+    image.src = url;
+  });
+}
+
+// The image as a JPEG data URL, no larger than `size` on its longest side.
+function resized(image, size) {
+  const scale = Math.min(1, size / Math.max(image.width, image.height));
+  const canvas = document.createElement("canvas");
+  canvas.width = Math.round(image.width * scale);
+  canvas.height = Math.round(image.height * scale);
+  canvas.getContext("2d").drawImage(image, 0, 0, canvas.width, canvas.height);
+  return canvas.toDataURL("image/jpeg", 0.85);
+}
