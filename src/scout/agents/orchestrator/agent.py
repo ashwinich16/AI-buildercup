@@ -232,13 +232,7 @@ class ScoutOrchestrator(BaseAgent):
         result = await asyncio.to_thread(self.retriever.find, need, seen)
         logger.info("Retrieval for %r found %d (%d exact, relaxed: %s)", result.query_text,
                     len(result.products), len(result.exact_ids), result.relaxed)
-        if need.product_types and need.purpose and len(result.products) < 2 * PRODUCTS_TO_PRESENT:
-            # Few of that exact kind: other kinds in the category may suit the occasion just as well (loafers or
-            # boots for the office, not only dress shoes). They count as related; the ranking keeps the suitable.
-            wider = await asyncio.to_thread(self.retriever.find, need.model_copy(update={"product_types": []}),
-                                            seen | {p.id for p in result.products})
-            result = result.model_copy(update={"products": [*result.products, *wider.products]})
-        result, fit_notes = await asyncio.to_thread(self._rank_for_occasion, need, result)
+        result, fit_notes = await asyncio.to_thread(self._rank_for_occasion, need, result, seen)
         heard = set(state.get(state_keys.SEEN) or [])
         if heard and not seen:     # a changed request ("cheaper"): ones they have not heard yet come first
             heard_names = {same_listing_key(p) for p in state_keys.shortlist(state).values() if p.id in heard}
@@ -279,15 +273,31 @@ class ScoutOrchestrator(BaseAgent):
         return bool(searched and state.get(state_keys.SHORTLIST)) and \
             ShoppingNeed.model_validate(searched) == state_keys.need(state)
 
-    def _rank_for_occasion(self, need: ShoppingNeed, result: RetrievalResult) -> tuple[RetrievalResult, dict]:
+    def _rank_for_occasion(self, need: ShoppingNeed, result: RetrievalResult,
+                           exclude: set[str]) -> tuple[RetrievalResult, dict]:
         """When they named an occasion (a wedding, the gym), the products best for it first; search matches
-        the words, not the occasion. Exact matches stay ahead of related ones."""
-        if self.occasion_ranker is None or not need.purpose or len(result.products) < 2:
+        the words, not the occasion. Exact matches that suit it stay ahead of related ones."""
+        if self.occasion_ranker is None or not need.purpose or not result.products:
             return result, {}
         kind = " or ".join(need.product_types) or need.category or "item"
-        ranked, notes = self.occasion_ranker.rank(need.purpose, kind, need.looking_for, result.products)
-        ranked.sort(key=lambda p: p.id not in result.exact_ids)      # stable: occasion order within each
+        ranked, notes = self._suited(need.purpose, kind, need.looking_for, need, result.products, exclude)
+        ranked.sort(key=lambda p: (p.id not in notes, p.id not in result.exact_ids))   # stable within each
         return result.model_copy(update={"products": ranked}), notes
+
+    def _suited(self, occasion: str, kind: str, looks_like: str, need: ShoppingNeed, products: list[Product],
+                exclude: set[str]) -> tuple[list[Product], dict]:
+        """The products best for the occasion first, and why each that suits it does. When fewer than three
+        suit it (every soft long-sleeve top found was gym wear, for an office), the whole category is
+        searched too: a blouse or a shirt may suit the occasion where that exact kind does not."""
+        ranked, notes = self.occasion_ranker.rank(occasion, kind, looks_like, products)
+        if len(notes) < PRODUCTS_TO_PRESENT and (need.product_types or need.looking_for) and need.category:
+            wider = self.retriever.find(need.model_copy(update={"product_types": [], "looking_for": ""}),
+                                        exclude | {p.id for p in products})
+            if wider.products:
+                logger.info("Only %d of %d suit %r; widened to the whole %s category", len(notes), len(products),
+                            occasion, need.category)
+                ranked, notes = self.occasion_ranker.rank(occasion, kind, looks_like, [*products, *wider.products])
+        return ranked, notes
 
     async def _more_options(self, ctx: InvocationContext, keep_positions: list[int]):
         """Options they have not heard yet. Only ones that still fit the need: if this message tightened it
@@ -390,6 +400,18 @@ class ScoutOrchestrator(BaseAgent):
 
         capsule = state_keys.capsule(ctx.session.state)
         if capsule is not None and suggested is None and state_keys.planning_outfit(ctx.session.state):
+            # Its size is settled as it is chosen (once per kind of size: one top size for the shirt and the
+            # jacket), so the whole outfit can go in the cart later without more questions.
+            scale = size_scale(product)
+            size, _ = self._size_for(ctx, scale, turn)
+            if scale is not None and size is None:
+                async for item in self._ask_size(ctx, product, scale, False, turn.reason):
+                    yield item
+                return
+            if scale is not None:
+                known = {**(ctx.session.state.get(state_keys.KNOWN_SIZES) or {}), scale.key: size}
+                yield self._update_state(ctx, {state_keys.KNOWN_SIZES: known, state_keys.PENDING_SIZE: None,
+                                               state_keys.SIZE_CHOICES: None})
             # Planning an outfit: what they choose goes into it (the piece being chosen, else the piece of
             # that kind, else a new piece of that kind), never into the cart.
             piece = (capsule.new_piece(capsule.current or "") or capsule.new_piece(product.category or "")
@@ -397,7 +419,8 @@ class ScoutOrchestrator(BaseAgent):
             capsule.choose(piece.key, product)
             capsule.skipped = [key for key in capsule.skipped if key != piece.key]
             following = capsule.move_on()
-            event = (f"They chose {' '.join(product.title.split()[:8])} for the {piece.category}. "
+            in_size = f" in size {scale.label(size)}" if scale is not None else ""
+            event = (f"They chose {' '.join(product.title.split()[:8])}{in_size} for the {piece.category}. "
                      + (f"Next: the {following.category}." if following else "Every piece is now settled."))
             async for item in self._offer_options(ctx, capsule, event):
                 yield item
@@ -700,7 +723,10 @@ class ScoutOrchestrator(BaseAgent):
         if piece is not None:
             need = capsule.need_for(piece, base, wish)
             result = await asyncio.to_thread(self._search_piece, need, set(capsule.shown.get(piece.key, [])))
-            ranked = await asyncio.to_thread(self._for_occasion, capsule, piece, result.products)
+            logger.info("Outfit piece %s: searched %r (types %s) found %d", piece.key, need.search_text(),
+                        need.product_types, len(result.products))
+            ranked = await asyncio.to_thread(self._for_occasion, capsule, piece, result.products, need,
+                                             set(capsule.shown.get(piece.key, [])))
             result = result.model_copy(update={"products": ranked})
             options = result.products[:PRODUCTS_TO_PRESENT]
             capsule.offer(piece.key, [p.id for p in options])
@@ -722,7 +748,7 @@ class ScoutOrchestrator(BaseAgent):
         def best(piece: NewPiece) -> Optional[Product]:
             piece_need = capsule.need_for(piece, need, wish)
             found = self._search_piece(piece_need, set(capsule.shown.get(piece.key, []))).products
-            found = self._for_occasion(capsule, piece, found)
+            found = self._for_occasion(capsule, piece, found, piece_need, set(capsule.shown.get(piece.key, [])))
             return next((p for p in found if self.retriever.fits(piece_need, p)), found[0] if found else None)
 
         if not pieces:
@@ -732,13 +758,15 @@ class ScoutOrchestrator(BaseAgent):
                 if product is not None:
                     capsule.choose(piece.key, product)
 
-    def _for_occasion(self, capsule: Capsule, piece: NewPiece, products: list[Product]) -> list[Product]:
+    def _for_occasion(self, capsule: Capsule, piece: NewPiece, products: list[Product], need: ShoppingNeed,
+                      exclude: set[str]) -> list[Product]:
         """The products found for a piece, best for the occasion first (search matches the piece, not the
         occasion). Why each suits it is kept on the capsule, for Scout to say."""
-        if self.occasion_ranker is None:
+        if self.occasion_ranker is None or not products:
             return products
-        ranked, notes = self.occasion_ranker.rank(capsule.plan.occasion, piece.category, piece.looks_like, products)
-        capsule.fit_notes.update(notes)
+        ranked, notes = self._suited(capsule.plan.occasion, piece.category, piece.looks_like, need, products,
+                                     exclude)
+        capsule.fit_notes.update({pid: why for pid, why in notes.items() if why})
         return ranked
 
     def _search_piece(self, need: ShoppingNeed, exclude: set[str]) -> RetrievalResult:

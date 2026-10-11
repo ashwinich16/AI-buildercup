@@ -57,7 +57,8 @@ class OccasionRanker:
     def rank(self, occasion: str, piece: str, looks_like: str,
              products: list[Product]) -> tuple[list[Product], dict[str, str]]:
         """The products best first for the occasion (ones that do not suit it last, never left out: they are
-        still there for "more options"), and why each that suits it does, by product id."""
+        still there for "more options"), and why each that suits it does, by product id (every product that
+        suits it is there, so its length says how many do)."""
         if not occasion or len(products) < 2:
             return products, {}
         listed = "\n".join(f"[{p.id}] {_describe(p)}" for p in products)
@@ -75,7 +76,7 @@ class OccasionRanker:
         fits.sort(key=lambda fit: not fit.suits)                 # stable: the stylist's order within each
         ranked = [by_id[fit.product_id] for fit in fits]
         ranked += [p for p in products if p.id not in {fit.product_id for fit in fits}]   # any it skipped
-        return ranked, {fit.product_id: fit.why for fit in fits if fit.suits and fit.why}
+        return ranked, {fit.product_id: fit.why for fit in fits if fit.suits}
 
 
 def _describe(product: Product) -> str:
