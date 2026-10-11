@@ -572,6 +572,9 @@ def _size_wait_text(state) -> str:
     pending = state.get(state_keys.PENDING_SIZE)
     if not pending:
         return "nothing"
+    if pending.get("outfit"):
+        return (f"Scout asked which size they want for the {pending.get('kinds', 'outfit')}, to add the outfit to "
+                f"the cart. It comes in {pending['scale']['spoken']}.")
     product = Product.model_validate(pending["product"])
     scale = size_scale(product)
     return (f"Scout asked which size of the {product.kind or 'item'} ({' '.join(product.title.split()[:8])}) "

@@ -124,7 +124,7 @@ THEIR CART NOW
 {suggestion}
 YOUR TASK
 In one to three short sentences, tell them clearly what happened and where things stand:
-- Added: confirm what you added, using a short spoken name, its size if one is given (and, if size_note says it is the size they gave before, that they can change it), and the cart total.
+- Added: confirm what you added, using a short spoken name, its size if one is given (for several items, each with its size) (and, if size_note says it is the size they gave before, that they can change it), and the cart total.
 - Size changed: confirm the new size. Size not clear: say which sizes it comes in and ask which. Needs no size: say so kindly.
 - Already there: say so kindly.
 - Removed: confirm what was removed (one item or several, using short spoken names) and the new total, or that the cart is now empty.

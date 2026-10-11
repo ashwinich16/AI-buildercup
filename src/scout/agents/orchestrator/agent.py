@@ -53,7 +53,7 @@ from scout.agents.model_io import content_text
 from scout.agents.narration import NarrationTask
 from scout.domain import Capsule, CapsulePlan, NewPiece, Product, ShoppingNeed
 from scout.tools import CatalogOverviewBuilder, ProductReferenceResolver, ProductRetriever, RetrievalResult
-from scout.domain.sizes import read_size, scale_of_label, size_scale
+from scout.domain.sizes import SizeScale, read_size, scale_of_label, size_scale
 from scout.tools.occasion_fit import OccasionRanker
 from scout.tools.retrieval import same_listing_key
 from scout.tools.recommendations import Recommender, Suggestion, SuggestionRules
@@ -156,10 +156,15 @@ class ScoutOrchestrator(BaseAgent):
                 yield event
 
     async def _route(self, ctx: InvocationContext, turn: TurnUnderstanding):
+        pending = ctx.session.state.get(state_keys.PENDING_SIZE)
+        if pending and pending.get("outfit") and turn.size and turn.intent in ("choose", "other"):
+            async for item in self._outfit_size_given(ctx, turn, pending):   # a size for the outfit's pieces
+                yield item
+            return
         if state_keys.planning_outfit(ctx.session.state):
             turn = self._as_outfit_step(ctx, turn)
-        pending = ctx.session.state.get(state_keys.PENDING_SIZE)
-        if pending and turn.size and turn.intent in ("choose", "other") and not turn.about_suggestion:
+        if pending and turn.size and turn.intent in ("choose", "other") and not turn.about_suggestion \
+                and not pending.get("outfit"):
             product = Product.model_validate(pending["product"])      # the size for the product being added
             turn = turn.model_copy(update={"intent": "choose", "reason": turn.reason or pending.get("reason")})
             async for item in self._choose(ctx, turn, product if pending.get("suggested") else None, chosen=product):
@@ -751,7 +756,7 @@ class ScoutOrchestrator(BaseAgent):
         async for item in self.narration.run_async(ctx):
             yield item
 
-    async def _add_capsule_to_cart(self, ctx: InvocationContext, capsule: Capsule):
+    async def _add_capsule_to_cart(self, ctx: InvocationContext, capsule: Capsule, follow_up: bool = False):
         """The new pieces go in the cart and the outfit is finished: back to regular shopping. The board stays,
         so they can still try the looks on."""
         products = capsule.products_to_buy()
@@ -759,7 +764,28 @@ class ScoutOrchestrator(BaseAgent):
             yield self._say(ctx, "Good news: this plan doesn't need anything new. You already own every piece!")
             return
         cart = state_keys.cart(ctx.session.state)
-        added = [product.title for product in products if cart.add(product)]
+        known = ctx.session.state.get(state_keys.KNOWN_SIZES) or {}
+        new = [p for p in products if all(item.product_id != p.id for item in cart.items)]
+        missing = next((scale for scale in map(size_scale, new)
+                        if scale is not None and known.get(scale.key) not in scale.options), None)
+        if missing is not None:
+            kinds = list(dict.fromkeys(p.kind or "item" for p in new
+                                       if (size_scale(p) or missing).key == missing.key and size_scale(p)))
+            names = " and the ".join([", the ".join(kinds[:-1]), kinds[-1]]) if len(kinds) > 1 else kinds[0]
+            yield self._update_state(ctx, {
+                state_keys.PENDING_SIZE: {"outfit": True, "scale": missing.model_dump(), "kinds": names},
+                state_keys.SIZE_CHOICES: missing.options,
+            })
+            opening = "Got it. And" if follow_up else "Lovely! Before I add the outfit to your cart:"
+            yield self._say(ctx, f"{opening} what size would you like for the {names}? "
+                                 f"They come in {missing.spoken}.")
+            return
+        added = []
+        for product in products:
+            scale = size_scale(product)
+            label = scale.label(known[scale.key]) if scale is not None else None
+            if cart.add(product, label):
+                added.append(f"{product.title}{' (size ' + label + ')' if label else ''}")
         capsule.current = None
         yield self._update_state(ctx, {
             state_keys.CART: cart.model_dump(),
@@ -770,9 +796,29 @@ class ScoutOrchestrator(BaseAgent):
             state_keys.CAPSULE: capsule.model_dump(),
             state_keys.PRESENTED: [],
             state_keys.MODE: None,
+            state_keys.PENDING_SIZE: None,
+            state_keys.SIZE_CHOICES: None,
         })
         async for event in self.narration.run_async(ctx):
             yield event
+
+    async def _outfit_size_given(self, ctx: InvocationContext, turn: TurnUnderstanding, pending: dict):
+        """They gave a size while the outfit waits to go in the cart: remember it, then carry on adding (which
+        asks for the next kind of size, if one is still missing)."""
+        scale = SizeScale.model_validate(pending["scale"])
+        size = read_size(turn.size or "", scale)
+        if size is None:
+            yield self._say(ctx, f"Sorry, I didn't catch a size I know for the {pending.get('kinds', 'outfit')}. "
+                                 f"They come in {scale.spoken}.")
+            return
+        known = {**(ctx.session.state.get(state_keys.KNOWN_SIZES) or {}), scale.key: size}
+        yield self._update_state(ctx, {state_keys.KNOWN_SIZES: known, state_keys.PENDING_SIZE: None})
+        capsule = state_keys.capsule(ctx.session.state)
+        if capsule is None:
+            yield self._say(ctx, "Sorry, I lost track of the outfit. Shall we plan it again?")
+            return
+        async for item in self._add_capsule_to_cart(ctx, capsule, follow_up=True):
+            yield item
 
     async def _leave_capsule(self, ctx: InvocationContext):
         yield self._update_state(ctx, {state_keys.CAPSULE: None, state_keys.PRESENTED: [], state_keys.MODE: None})
@@ -905,7 +951,8 @@ class ScoutOrchestrator(BaseAgent):
 
         pending = state.get(state_keys.PENDING_SIZE)
         if pending:                                   # the answer to "what size?" (or a size button)
-            scale = size_scale(Product.model_validate(pending["product"]))
+            scale = (SizeScale.model_validate(pending["scale"]) if pending.get("outfit")
+                     else size_scale(Product.model_validate(pending["product"])))
             size = read_size(text, scale) if scale else None
             if size and len(text.split()) <= 4:
                 return TurnUnderstanding(intent="choose", size=size, **base)
