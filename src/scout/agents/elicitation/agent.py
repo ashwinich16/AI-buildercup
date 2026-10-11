@@ -220,7 +220,7 @@ FOR THE SHOPPER'S NEW MESSAGE
 2. need: return the COMPLETE updated need. Keep everything already known; add or change only what this message says. Never invent details. category must be one of the catalog categories, or null. When the shopper names a kind of product, use the categories in WHAT THE SHOP ACTUALLY HAS as a strong hint for which catalog category it belongs to.
    product_types: the specific kind(s) they want, spelled exactly as in PRODUCT TYPES IN THE SHOP. Fill it only when their words clearly mean one of those kinds. A general word that people use for several of the shop's kinds leaves product_types empty. When they accept another kind you offered, add it.
    purpose: the occasion or use, in their words. When it points to particular kinds the shop has for that person (see "Kinds of ..." in WHAT THE SHOP ACTUALLY HAS), also put those kinds in product_types, so the search looks for the right kind.
-   gender: whose STYLE the item is, and only from what the shopper says. Naming the style, or naming the person it is for, settles it; saying it does not matter means "any". Never infer it from their name, voice, way of talking, profile, or from who is talking: an item they want for themselves does NOT settle it, because anyone can shop for any style. When they move on to a different kind of product, keep the gender only if they make clear it is for the same person. When your last question asked whose style it is, a reply that names a style answers it: set gender from it, even when the reply is only a few words.
+   gender: whose STYLE the item is, and only from what the shopper says. When they correct themselves ("for a woman... no, actually men's"), in one message or across messages, the LAST thing they say wins. Naming the style, or naming the person it is for, settles it; saying it does not matter means "any". Never infer it from their name, voice, way of talking, profile, or from who is talking: an item they want for themselves does NOT settle it, because anyone can shop for any style. When they move on to a different kind of product, keep the gender only if they make clear it is for the same person. When your last question asked whose style it is, a reply that names a style answers it: set gender from it, even when the reply is only a few words.
    budget_min / budget_max: the price range they give, as a lower and an upper limit (a single limit sets only that one; a range sets both). A new limit of one kind replaces the old one of that kind.
    must_have: every specific quality they ask the product to have, in plain words a product description would use. When they ask for a different value of a quality they already gave, it replaces the old one.
 
@@ -287,7 +287,7 @@ class ElicitationAgentBuilder:
         tuning = self._settings.tuning("elicitation")
         return LlmAgent(
             name="elicitation",
-            model=self._settings.model_for("elicitation"),
+            model=self._settings.llm("elicitation"),
             description="Understands each shopper message, updates the shopping need, "
                         "and asks a friendly clarifying question until the need is clear.",
             instruction=self._instruction,
@@ -366,7 +366,7 @@ class ElicitationAgentBuilder:
         state[state_keys.NEXT_UP] = self._next_up(state, turn)
         message = content_text(callback_context.user_content, separator=" ")
         turn.need.avoid = self._grounded_avoid(state, turn, message)
-        if self._must_ask_kind(turn, asked):
+        if self._must_ask_kind(turn, asked) and not state.get(state_keys.OUTFIT_REQUESTED)                 and not state_keys.planning_outfit(state):   # an outfit is planned piece by piece, not by kind
             logger.info("Need has no kind of product; asking which before searching.")
             turn.ready_to_search = False
             turn.question = turn.question or _kind_question(turn.need, self._catalog.categories())
@@ -583,8 +583,9 @@ def _size_wait_text(state) -> str:
 
 def _kind_question(need: ShoppingNeed, categories: list[str]) -> str:
     """Asked only when the model wanted to search with no kind of product at all."""
-    occasion = f" for {need.purpose}" if need.purpose else ""
-    offered = [c.lower() for c in categories[:3]]
+    occasion = f" for {need.purpose.removeprefix('for ')}" if need.purpose else ""
+    wearable = [c for c in ("shirt", "top", "trousers", "jeans", "shoe", "jacket") if c in categories]
+    offered = [c.lower() for c in (wearable or categories)[:3]]
     choices = ", ".join(offered[:-1]) + f" or {offered[-1]}" if len(offered) > 1 else "".join(offered)
     return f"Lovely! What would you like to find{occasion}: {choices}? Or I can plan a whole outfit with you."
 

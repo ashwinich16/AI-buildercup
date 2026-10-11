@@ -1,0 +1,211 @@
+{
+ "athletic top": [
+  "sweatshirt",
+  "sneaker",
+  "socks"
+ ],
+ "backpack": [
+  "laptop bag",
+  "wallet",
+  "sunglasses"
+ ],
+ "belt": [
+  "casual trousers",
+  "jeans",
+  "dress pants"
+ ],
+ "blazer": [
+  "dress pants",
+  "dress shoe",
+  "shirt"
+ ],
+ "blouse": [
+  "dress pants",
+  "jeans"
+ ],
+ "boot": [
+  "socks",
+  "jeans",
+  "jacket"
+ ],
+ "briefcase": [
+  "dress shoe",
+  "dress pants",
+  "shirt"
+ ],
+ "casual trousers": [
+  "t-shirt",
+  "hoodie",
+  "sneaker"
+ ],
+ "chinos": [
+  "shirt",
+  "polo",
+  "t-shirt"
+ ],
+ "coat": [
+  "scarf",
+  "boot",
+  "dress pants"
+ ],
+ "crossbody bag": [
+  "wallet",
+  "jewelry",
+  "sunglasses"
+ ],
+ "dress pants": [
+  "dress shoe",
+  "shirt",
+  "blazer"
+ ],
+ "dress shoe": [
+  "dress pants",
+  "shirt",
+  "blazer"
+ ],
+ "handbag": [
+  "wallet",
+  "scarf",
+  "jewelry"
+ ],
+ "hat": [
+  "sunglasses",
+  "scarf",
+  "jewelry"
+ ],
+ "heel": [
+  "dress pants",
+  "dress shoe",
+  "handbag"
+ ],
+ "hoodie": [
+  "jeans",
+  "sneaker",
+  "t-shirt"
+ ],
+ "jacket": [
+  "shirt",
+  "jeans",
+  "sneaker"
+ ],
+ "jeans": [
+  "t-shirt",
+  "sneaker",
+  "hoodie"
+ ],
+ "jewelry": [
+  "scarf",
+  "handbag"
+ ],
+ "laptop bag": [
+  "briefcase",
+  "wallet",
+  "watch"
+ ],
+ "loafer": [
+  "socks",
+  "dress pants",
+  "belt"
+ ],
+ "polo": [
+  "jeans",
+  "sneaker",
+  "hoodie"
+ ],
+ "sandal": [
+  "handbag",
+  "jewelry"
+ ],
+ "scarf": [
+  "hat",
+  "sunglasses",
+  "jewelry"
+ ],
+ "shirt": [
+  "jeans",
+  "jacket",
+  "sneaker"
+ ],
+ "shopping bag": [
+  "wallet",
+  "sunglasses",
+  "scarf"
+ ],
+ "slipper": [
+  "socks",
+  "sweatshirt",
+  "hoodie"
+ ],
+ "sneaker": [
+  "socks",
+  "jeans",
+  "t-shirt"
+ ],
+ "socks": [
+  "dress shoe",
+  "sneaker",
+  "boot"
+ ],
+ "sunglasses": [
+  "hat",
+  "scarf",
+  "jewelry"
+ ],
+ "sweatshirt": [
+  "jeans",
+  "sneaker",
+  "hoodie"
+ ],
+ "t-shirt": [
+  "jeans",
+  "sneaker",
+  "hoodie"
+ ],
+ "tank top": [
+  "jeans",
+  "sneaker"
+ ],
+ "thermal top": [
+  "hoodie",
+  "jeans",
+  "sneaker"
+ ],
+ "tie clip": [
+  "shirt",
+  "blazer",
+  "dress pants"
+ ],
+ "tote": [
+  "wallet",
+  "scarf",
+  "sunglasses"
+ ],
+ "tunic": [
+  "jeans"
+ ],
+ "vest": [
+  "shirt",
+  "jeans",
+  "sneaker"
+ ],
+ "wallet": [
+  "handbag",
+  "crossbody bag",
+  "tote"
+ ],
+ "watch": [
+  "jewelry",
+  "belt",
+  "sunglasses"
+ ],
+ "wide-leg trousers": [
+  "blouse",
+  "handbag",
+  "dress shoe"
+ ],
+ "wristlet": [
+  "wallet",
+  "jewelry",
+  "handbag"
+ ]
+}

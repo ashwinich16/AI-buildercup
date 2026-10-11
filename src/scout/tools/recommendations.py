@@ -17,11 +17,11 @@ The reasons it is a good match are returned with it, so Scout can say why in one
 import json
 import logging
 import math
+from pathlib import Path
 from abc import ABC, abstractmethod
 from concurrent.futures import ThreadPoolExecutor
 from typing import Optional
 
-from google import genai
 from google.genai import types
 from pydantic import BaseModel, Field
 
@@ -76,10 +76,13 @@ not complete it), and never the {kind} itself. Spell each kind exactly as listed
 
 
 class GeminiPairingAdvisor(PairingAdvisor):
-    """Asks Gemini once per kind and remembers the answer for the life of the process."""
+    """Asks Gemini once per kind and remembers the answer, in a file too: what goes with what does not change,
+    so a restart (or every reload while developing) does not ask Gemini about all the shop's kinds again."""
+
+    SAVED = Path(__file__).with_name("pairings.json")
 
     def __init__(self, settings: Settings):
-        self._client = genai.Client(vertexai=True, project=settings.project_id, location=settings.vertex_location)
+        self._client = settings.genai_client()
         self._model = settings.model_for("recommender")
         tuning = settings.tuning("recommender")
         self._config = types.GenerateContentConfig(
@@ -88,13 +91,26 @@ class GeminiPairingAdvisor(PairingAdvisor):
             response_schema=_Pairing,
             thinking_config=types.ThinkingConfig(thinking_budget=tuning.thinking_budget),
         )
-        self._known: dict[str, list[str]] = {}
+        self._known: dict[str, list[str]] = self._load()
+
+    def _load(self) -> dict[str, list[str]]:
+        try:
+            return json.loads(self.SAVED.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return {}
+
+    def _save(self) -> None:
+        try:
+            self.SAVED.write_text(json.dumps(self._known, indent=1, sort_keys=True), encoding="utf-8")
+        except OSError as error:      # read-only deploys still work; they just ask again next time
+            logger.info("Could not save pairings: %s", error)
 
     def prepare(self, shop_kinds: list[str]) -> None:
         """Ask about every kind the shop has, all at once, so adding to the cart never waits for Gemini
         (one call took about 9 seconds when made at add-to-cart time)."""
         missing = [k for k in shop_kinds if k not in self._known]
         if not missing:
+            logger.info("Pairings for %d kinds loaded from %s.", len(self._known), self.SAVED.name)
             return
 
         def ask(kind: str) -> None:
@@ -103,8 +119,9 @@ class GeminiPairingAdvisor(PairingAdvisor):
             except Exception as error:   # one kind failing must not stop the others
                 logger.warning("Could not prepare pairings for %s: %s", kind, error)
 
-        with ThreadPoolExecutor(max_workers=8) as pool:
+        with ThreadPoolExecutor(max_workers=3) as pool:     # gently: the shopper's own calls share the quota
             list(pool.map(ask, missing))
+        self._save()
         logger.info("Prepared pairings for %d kinds.", len(self._known))
 
     def kinds_that_go_with(self, kind: str, shop_kinds: list[str]) -> list[str]:

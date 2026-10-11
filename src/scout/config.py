@@ -76,6 +76,7 @@ class Settings:
 
     # Virtual try-on (Vertex AI)
     try_on_model: str
+    try_on_location: str        # virtual try-on is offered in a few regions only
 
     # Web app
     auth_mode: str              # "demo" (persona picker) or "firebase" (Sign in with Google)
@@ -102,6 +103,20 @@ class Settings:
         """Each agent can run on its own model; falls back to SCOUT_AGENT_MODEL."""
         return self.tuning(agent).model or self.agent_model
 
+    def llm(self, agent: str):
+        """The Gemini model for an agent. When Gemini is briefly busy (429) or unavailable, the call is tried
+        again after a short wait instead of failing the shopper's turn."""
+        from google.adk.models import Gemini
+        return Gemini(model=self.model_for(agent), retry_options=_retry())
+
+    def genai_client(self, location: str = ""):
+        """A Gemini client for direct calls (pairings, occasion ranking, wardrobe photos, try-on), with the
+        same retries."""
+        from google import genai
+        from google.genai import types
+        return genai.Client(vertexai=True, project=self.project_id, location=location or self.vertex_location,
+                            http_options=types.HttpOptions(retry_options=_retry()))
+
     @property
     def search_serving_config(self) -> str:
         """Full resource name of the Vertex AI Search serving config."""
@@ -125,6 +140,7 @@ class Settings:
                           for name, default in AGENT_TUNING_DEFAULTS.items()},
             elicitation_safety_max_questions=int(_optional("SCOUT_ELICITATION_SAFETY_MAX_QUESTIONS", "6")),
             try_on_model=_optional("SCOUT_TRY_ON_MODEL", "virtual-try-on-001"),
+            try_on_location=_optional("SCOUT_TRY_ON_LOCATION", "us-central1"),
             auth_mode=_optional("SCOUT_AUTH_MODE", "demo").lower(),
             firebase_api_key=_optional("SCOUT_FIREBASE_API_KEY"),
             firebase_auth_domain=_optional("SCOUT_FIREBASE_AUTH_DOMAIN", f"{project_id}.firebaseapp.com"),
@@ -138,6 +154,12 @@ class Settings:
             search_data_store_id=_optional("SCOUT_SEARCH_DATA_STORE_ID"),
             search_result_limit=int(_optional("SCOUT_SEARCH_RESULT_LIMIT", "8")),
         )
+
+
+def _retry():
+    from google.genai import types
+    return types.HttpRetryOptions(attempts=4, initial_delay=1.0, max_delay=8.0, exp_base=2.0,
+                                  http_status_codes=[429, 500, 503])
 
 
 @lru_cache(maxsize=1)

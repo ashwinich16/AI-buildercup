@@ -158,9 +158,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             try:
                 async for item in chat.send_stream(shopper.id, body.session_id, body.message.strip()):
                     yield json.dumps(item) + "\n"
-            except Exception:
+            except Exception as error:
                 logger.exception("Streaming turn failed for %s", shopper.id)
-                yield json.dumps({"type": "error", "detail": "Something went wrong on my side."}) + "\n"
+                busy = "429" in str(error) or "RESOURCE_EXHAUSTED" in str(error)
+                detail = "I'm getting a lot of requests right now." if busy else ""
+                yield json.dumps({"type": "error", "detail": detail}) + "\n"
 
         return StreamingResponse(lines(), media_type="application/x-ndjson")
 

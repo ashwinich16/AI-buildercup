@@ -192,7 +192,7 @@ class NarrationAgentBuilder:
         tuning = self._settings.tuning("narration")
         return LlmAgent(
             name="narration",
-            model=self._settings.model_for("narration"),
+            model=self._settings.llm("narration"),
             description="Speaks results to the shopper in a warm, vivid, grounded way.",
             instruction=self._instruction,
             include_contents="none",            # it speaks from state, not from chat history

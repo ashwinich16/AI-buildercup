@@ -418,13 +418,17 @@ _FORMATTING = re.compile(r"[*#`_>]+|^[ \t]*[-•][ \t]+", re.MULTILINE)
 
 
 def _spoken_cart(cart: Cart, named: int = 2) -> str:
-    """The cart in a few words: the first items by a short name, then how many more."""
-    # By kind ("the jeans"), not the long catalogue title read aloud ("Jeans Men Stretch Slim Fit Straight").
-    names = [f"the {item.kind}" if item.kind else " ".join(item.name.split()[:6]) for item in cart.items[:named]]
-    others = len(cart.items) - len(names)
-    if others:
-        names.append(f"{others} more {'item' if others == 1 else 'items'}")
-    return names[0] if len(names) == 1 else ", ".join(names[:-1]) + " and " + names[-1]
+    """The cart in a few words: by kind ("the jeans and the shirt"), or how many items with a kind or two.
+    Never the long catalogue titles ("526Jeanswear 'SENJO' Mens Designer Branded Stretch"), which are not
+    worth hearing read aloud."""
+    kinds = list(dict.fromkeys(item.kind for item in cart.items if item.kind))
+    count = len(cart.items)
+    if count == 1:
+        return f"the {kinds[0]}" if kinds else "one item"
+    if len(kinds) == count <= 3:
+        return ", ".join(f"the {kind}" for kind in kinds[:-1]) + f" and the {kinds[-1]}"
+    including = f", including the {' and the '.join(kinds[:named])}" if kinds else ""
+    return f"{count} items{including}"
 
 
 def _screen_from_state(state: dict) -> ScreenState:

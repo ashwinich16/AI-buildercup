@@ -90,7 +90,7 @@ class ComparisonAgentBuilder:
         tuning = self._settings.tuning("comparison")
         return LlmAgent(
             name="comparison",
-            model=self._settings.model_for("comparison"),
+            model=self._settings.llm("comparison"),
             description="Compares presented products for the shopper's need and returns a structured analysis.",
             instruction=self._instruction,
             include_contents="none",

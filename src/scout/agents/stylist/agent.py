@@ -65,7 +65,7 @@ class StylistAgentBuilder:
         tuning = self._settings.tuning("stylist")
         return LlmAgent(
             name="stylist",
-            model=self._settings.model_for("stylist"),
+            model=self._settings.llm("stylist"),
             description="Plans outfits for any occasion from the shopper's wardrobe and the shop's categories.",
             instruction=self._instruction,
             include_contents="none",

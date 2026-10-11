@@ -12,7 +12,6 @@ import binascii
 import logging
 from typing import Optional
 
-from google import genai
 from google.genai import types
 
 from scout.config import Settings
@@ -28,7 +27,7 @@ class TryOnError(RuntimeError):
 
 class TryOnStudio:
     def __init__(self, settings: Settings, images: ImageFetcher):
-        self._client = genai.Client(vertexai=True, project=settings.project_id, location=settings.vertex_location)
+        self._client = settings.genai_client(settings.try_on_location)
         self._model = settings.try_on_model
         self._images = images
 

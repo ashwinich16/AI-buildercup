@@ -11,7 +11,6 @@ import json
 import uuid
 from typing import Optional
 
-from google import genai
 from google.genai import types
 from pydantic import BaseModel, Field
 
@@ -41,7 +40,7 @@ see. If the photo shows no clothing, or it is too unclear to tell, return no pie
 
 class WardrobeTagger:
     def __init__(self, settings: Settings, catalog: CatalogRepository):
-        self._client = genai.Client(vertexai=True, project=settings.project_id, location=settings.vertex_location)
+        self._client = settings.genai_client()
         self._model = settings.model_for("wardrobe")
         tuning = settings.tuning("wardrobe")
         self._config = types.GenerateContentConfig(

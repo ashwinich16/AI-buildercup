@@ -10,7 +10,6 @@ import json
 import logging
 from typing import Optional
 
-from google import genai
 from google.genai import types
 from pydantic import BaseModel, Field
 
@@ -45,7 +44,7 @@ as given."""
 
 class OccasionRanker:
     def __init__(self, settings: Settings):
-        self._client = genai.Client(vertexai=True, project=settings.project_id, location=settings.vertex_location)
+        self._client = settings.genai_client()
         self._model = settings.model_for("occasion")
         tuning = settings.tuning("occasion")
         self._config = types.GenerateContentConfig(
