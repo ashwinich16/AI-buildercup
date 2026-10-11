@@ -35,8 +35,10 @@ PRODUCTS FOUND IN THE SHOP
 {products}
 
 Put EVERY product in order, the best for THIS occasion first: think of the setting, the weather it implies,
-what they will be doing, and how dressed up it is. Set suits false for any that would be wrong for it (for
-example heavy wool for a beach, gym or safety wear for an office or a wedding); those go last. For each, give
+what they will be doing, and how dressed up it is. Be strict, like a well-dressed friend: set suits true only
+if a sensible person would really wear it there. Set suits false for anything made for another activity (gym,
+running, football, hiking, ski or winter sports, safety work, sleep or lounging) when the occasion is not that
+activity, and for anything clearly too casual or too dressy for it; those go last. For each, give
 in at most eight plain words why it suits the occasion (or why not), from its real details. Judge by the
 product's real details, not only its kind: a smart leather boat shoe can suit an office. Use the ids exactly
 as given."""
@@ -55,10 +57,10 @@ class OccasionRanker:
         )
 
     def rank(self, occasion: str, piece: str, looks_like: str,
-             products: list[Product]) -> tuple[list[Product], dict[str, str]]:
+             products: list[Product]) -> tuple[list[Product], Optional[dict[str, str]]]:
         """The products best first for the occasion (ones that do not suit it last, never left out: they are
         still there for "more options"), and why each that suits it does, by product id (every product that
-        suits it is there, so its length says how many do)."""
+        suits it is there, so its length says how many do). None when it could not judge."""
         if not occasion or len(products) < 2:
             return products, {}
         listed = "\n".join(f"[{p.id}] {_describe(p)}" for p in products)
@@ -68,11 +70,11 @@ class OccasionRanker:
             ranking = _Ranking.model_validate(json.loads(response.text)).ranked
         except Exception as error:   # the search order is still a reasonable answer
             logger.warning("Could not rank %s for the occasion: %s", piece, error)
-            return products, {}
+            return products, None
         by_id = {p.id: p for p in products}
         fits = list({fit.product_id: fit for fit in ranking if fit.product_id in by_id}.values())   # each once
         if not fits:
-            return products, {}
+            return products, None
         fits.sort(key=lambda fit: not fit.suits)                 # stable: the stylist's order within each
         ranked = [by_id[fit.product_id] for fit in fits]
         ranked += [p for p in products if p.id not in {fit.product_id for fit in fits}]   # any it skipped

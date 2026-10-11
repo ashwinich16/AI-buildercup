@@ -281,6 +281,8 @@ class ScoutOrchestrator(BaseAgent):
             return result, {}
         kind = " or ".join(need.product_types) or need.category or "item"
         ranked, notes = self._suited(need.purpose, kind, need.looking_for, need, result.products, exclude)
+        if notes is None:
+            return result, {}
         ranked.sort(key=lambda p: (p.id not in notes, p.id not in result.exact_ids))   # stable within each
         return result.model_copy(update={"products": ranked}), notes
 
@@ -290,13 +292,19 @@ class ScoutOrchestrator(BaseAgent):
         suit it (every soft long-sleeve top found was gym wear, for an office), the whole category is
         searched too: a blouse or a shirt may suit the occasion where that exact kind does not."""
         ranked, notes = self.occasion_ranker.rank(occasion, kind, looks_like, products)
-        if len(notes) < PRODUCTS_TO_PRESENT and (need.product_types or need.looking_for) and need.category:
-            wider = self.retriever.find(need.model_copy(update={"product_types": [], "looking_for": ""}),
-                                        exclude | {p.id for p in products})
-            if wider.products:
-                logger.info("Only %d of %d suit %r; widened to the whole %s category", len(notes), len(products),
-                            occasion, need.category)
-                ranked, notes = self.occasion_ranker.rank(occasion, kind, looks_like, [*products, *wider.products])
+        if notes is not None and len(notes) < PRODUCTS_TO_PRESENT and need.category:
+            # Worn in the same place, filed apart: a collared shirt is a "shirt", a polo may be a "top".
+            categories = [need.category, *_SAME_SLOT.get(need.category.lower(), [])]
+            taken = exclude | {p.id for p in products}
+            wider = []
+            for category in categories:
+                found = self.retriever.find(need.model_copy(update={"category": category, "product_types": [],
+                                                                    "looking_for": ""}), taken).products
+                wider += found
+                taken |= {p.id for p in found}
+            if wider:
+                logger.info("Only %d of %d suit %r; widened to %s", len(notes), len(products), occasion, categories)
+                ranked, notes = self.occasion_ranker.rank(occasion, kind, looks_like, [*products, *wider])
         return ranked, notes
 
     async def _more_options(self, ctx: InvocationContext, keep_positions: list[int]):
@@ -760,14 +768,17 @@ class ScoutOrchestrator(BaseAgent):
 
     def _for_occasion(self, capsule: Capsule, piece: NewPiece, products: list[Product], need: ShoppingNeed,
                       exclude: set[str]) -> list[Product]:
-        """The products found for a piece, best for the occasion first (search matches the piece, not the
-        occasion). Why each suits it is kept on the capsule, for Scout to say."""
+        """The products for a piece that suit the occasion, best first (search matches the piece, not the
+        occasion). Ones that do not suit it are never offered: none at all is better than a ski jacket for the
+        office (Scout then says so and offers to skip the piece). Why each suits it is kept for Scout to say."""
         if self.occasion_ranker is None or not products:
             return products
         ranked, notes = self._suited(capsule.plan.occasion, piece.category, piece.looks_like, need, products,
                                      exclude)
+        if notes is None:                         # could not judge: the search order, as before
+            return ranked
         capsule.fit_notes.update({pid: why for pid, why in notes.items() if why})
-        return ranked
+        return [p for p in ranked if p.id in notes]
 
     def _search_piece(self, need: ShoppingNeed, exclude: set[str]) -> RetrievalResult:
         """Search for an outfit piece. The Stylist may name kinds the shop has few of; if none fit, any
@@ -1073,6 +1084,8 @@ class ScoutOrchestrator(BaseAgent):
 def _ordinal(name: str) -> str:
     return rf"(?P<{name}>first|second|third|fourth|1st|2nd|3rd|4th|one|two|three|four|[1-4])"
 _FAST_POSITIONAL = [
+    (re.compile(rf"^(i'?ll |i will |let'?s )?(choose|pick|go with|take) option {_ordinal('n')}( for the outfit)?( please)?$"),
+     "choose"),
     (re.compile(rf"^(please )?(add|put) (option {_ordinal('n')}|(the )?{_ordinal('m')}( one)?)( (to|in|into) (my|the) cart)?( please)?$"),
      "choose"),
     (re.compile(rf"^(describe option {_ordinal('n')} in detail|(please )?(tell me (more )?about|describe) (the )?{_ordinal('m')}"
@@ -1082,6 +1095,9 @@ _FAST_POSITIONAL = [
 _FAST_SUGGESTION_N = re.compile(r"^(?P<verb>add|tell me about) suggestion (?P<n>[1-9])( to my cart)?$")
 _FAST_ADD_SUGGESTED = re.compile(r"^add the suggested [a-z' -]+ to my cart$")
 _FAST_SIMILAR_TO_SUGGESTED = re.compile(r"^show me other options like the suggested [a-z' -]+$")
+# Kinds worn in the same place but filed in different categories.
+_SAME_SLOT = {"top": ["shirt"], "shirt": ["top"], "trousers": ["jeans"], "jeans": ["trousers"]}
+
 _FAST_MORE = re.compile(r"^(please )?((show|give|find) me |can you show me |let me see |any )?(some |a few )?"
                         r"(more|other|different|some other)( options| ones| products| items| choices)?( please)?$")
 _FAST_COMPARE = re.compile(r"^compare (these|them)( for me)?( please)?$")
