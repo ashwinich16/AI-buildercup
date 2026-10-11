@@ -67,6 +67,7 @@ class StylistAgentBuilder:
         self._settings = settings
         self._catalog = catalog
         self._stock_cache: dict[Optional[str], str] = {}
+        self._kinds_in_stock: dict[Optional[str], dict[str, set[str]]] = {}   # style -> category -> kinds
 
     def build(self) -> LlmAgent:
         tuning = self._settings.tuning("stylist")
@@ -112,6 +113,7 @@ class StylistAgentBuilder:
                     logger.warning("Could not list %s for the stylist: %s", category, error)
                     continue
                 kinds = Counter(p.product_type or category for p in found).most_common()
+                self._kinds_in_stock.setdefault(gender, {})[category.lower()] = {k.lower() for k, _ in kinds}
                 lines.append(f"{category}: " + (", ".join(f"{kind} {n}" for kind, n in kinds) or "nothing"))
             self._stock_cache[gender] = "\n".join(lines) or "not available"
         return self._stock_cache[gender]
@@ -127,6 +129,16 @@ class StylistAgentBuilder:
         for piece in plan.new_pieces:
             piece.category = categories[piece.category.lower()]
             piece.product_types = [kinds[t.lower()] for t in piece.product_types if t.lower() in kinds]
+        # A piece of a kind the shop does not have in this style (a men's blazer) is left out, not filled with
+        # something unsuitable: an outfit is fine without it.
+        gender = state_keys.need(callback_context.state).gender_filter()
+        self._stock(gender)
+        in_stock = self._kinds_in_stock.get(gender, {})
+        missing = [p for p in plan.new_pieces if p.product_types and in_stock
+                   and not {t.lower() for t in p.product_types} & in_stock.get(p.category.lower(), set())]
+        for piece in missing:
+            logger.info("No %s in this style; leaving the %s out of the plan", piece.product_types, piece.category)
+        plan.new_pieces = [p for p in plan.new_pieces if p not in missing]
         owned = {item.id for item in state_keys.wardrobe(callback_context.state)}
         plan.leave_at_home = [left for left in plan.leave_at_home if left.owned in owned]
         packed = owned - {left.owned for left in plan.leave_at_home}

@@ -305,6 +305,14 @@ class ScoutOrchestrator(BaseAgent):
             if wider:
                 logger.info("Only %d of %d suit %r; widened to %s", len(notes), len(products), occasion, categories)
                 ranked, notes = self.occasion_ranker.rank(occasion, kind, looks_like, [*products, *wider])
+                # From the other category only real fits (a dress shirt for an office "top"), never a near miss
+                # (jeans when formal trousers run out).
+                own = (need.category or "").lower()
+                notes = {pid: why for pid, why in notes.items()
+                         if not (why.startswith("a close match") and
+                                 next((p.category or "" for p in ranked if p.id == pid), own).lower() != own)}
+        names: set[str] = set()                    # the same product listed twice is one option, not two
+        ranked = [p for p in ranked if not (same_listing_key(p) in names or names.add(same_listing_key(p)))]
         return ranked, notes
 
     async def _more_options(self, ctx: InvocationContext, keep_positions: list[int]):

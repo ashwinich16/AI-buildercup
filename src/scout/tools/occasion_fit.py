@@ -8,7 +8,7 @@ heat"). If the call fails, the search order is kept: the outfit is never held up
 """
 import json
 import logging
-from typing import Optional
+from typing import Literal, Optional
 
 from google.genai import types
 from pydantic import BaseModel, Field
@@ -20,8 +20,8 @@ logger = logging.getLogger(__name__)
 
 class OccasionFit(BaseModel):
     product_id: str
-    suits: bool = True     # would a good stylist wear it for this occasion at all?
-    why: str = ""          # why it suits the occasion (or why not), in a few words
+    fit: Literal["good", "close", "wrong"] = "good"   # would a well-dressed friend wear it there?
+    why: str = ""          # why it suits the occasion (or how it falls short), in a few words
 
 
 class _Ranking(BaseModel):
@@ -35,13 +35,17 @@ PRODUCTS FOUND IN THE SHOP
 {products}
 
 Put EVERY product in order, the best for THIS occasion first: think of the setting, the weather it implies,
-what they will be doing, and how dressed up it is. Be strict, like a well-dressed friend: set suits true only
-if a sensible person would really wear it there. Set suits false for anything made for another activity (gym,
-running, football, hiking, ski or winter sports, safety work, sleep or lounging) when the occasion is not that
-activity, and for anything clearly too casual or too dressy for it; those go last. For each, give
-in at most eight plain words why it suits the occasion (or why not), from its real details. Judge by the
-product's real details, not only its kind: a smart leather boat shoe can suit an office. Use the ids exactly
-as given."""
+what they will be doing, and how dressed up it is. Judge each one like a well-dressed friend:
+- fit "good": a sensible person would happily wear it there.
+- fit "close": it would do, but is a step off (a little less formal, a little more casual); say how in why.
+- fit "wrong": made for another activity (gym, running, football, hiking, ski or winter sports, safety work,
+  sleep or lounging) when the occasion is not that activity, or clearly out of place there. For anything smart,
+  formal or for work, hoodies, sweatshirts, track or athletic jackets, graphic tees and flip-flops are wrong.
+How dressed up the occasion is sets the bar: for a formal one, proper formal pieces are good, smart-casual ones
+(chinos, loafers) are close, and casual, outdoor, tactical, cargo or sporty ones are wrong.
+Judge each product on its own against the occasion, never against the others: if none of them is good, none is
+marked good. For each, give in at most eight plain words why it suits the occasion (or how it falls short), from its real
+details. Judge by the product's real details, not only its kind. Use the ids exactly as given."""
 
 
 class OccasionRanker:
@@ -50,7 +54,7 @@ class OccasionRanker:
         self._model = settings.model_for("occasion")
         tuning = settings.tuning("occasion")
         self._config = types.GenerateContentConfig(
-            temperature=0.2,
+            temperature=tuning.temperature,
             response_mime_type="application/json",
             response_schema=_Ranking,
             thinking_config=types.ThinkingConfig(thinking_budget=tuning.thinking_budget),
@@ -75,10 +79,12 @@ class OccasionRanker:
         fits = list({fit.product_id: fit for fit in ranking if fit.product_id in by_id}.values())   # each once
         if not fits:
             return products, None
-        fits.sort(key=lambda fit: not fit.suits)                 # stable: the stylist's order within each
+        fits.sort(key=lambda fit: ("good", "close", "wrong").index(fit.fit))   # stable: its order within each
         ranked = [by_id[fit.product_id] for fit in fits]
         ranked += [p for p in products if p.id not in {fit.product_id for fit in fits}]   # any it skipped
-        return ranked, {fit.product_id: fit.why for fit in fits if fit.suits}
+        # Good ones, and close ones said honestly ("a step less formal"); wrong ones are never noted.
+        return ranked, {fit.product_id: (fit.why if fit.fit == "good" else f"a close match: {fit.why}")
+                        for fit in fits if fit.fit != "wrong"}
 
 
 def _describe(product: Product) -> str:
