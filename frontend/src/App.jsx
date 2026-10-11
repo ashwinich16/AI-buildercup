@@ -67,6 +67,7 @@ export default function App() {
   const [photo, setPhoto] = useState(null); // the shopper's photo for try-on, kept only while the page is open
   const [attachments, setAttachments] = useState([]); // clothes photos attached in the chat: { id, preview, status, note }
   const [choices, setChoices] = useState([]); // short answers to Scout's last question, to tap
+  const [chooseOne, setChooseOne] = useState(false); // one tap answers it (a size)
   const [resumedChat, setResumedChat] = useState(false); // carrying on the last conversation: show what was said
   // The "You might also like" pop-up opens once for each new set of suggestions (e.g. after adding to cart).
   const [dismissedSuggestions, setDismissedSuggestions] = useState("");
@@ -176,6 +177,7 @@ export default function App() {
           };
         }
         setChoices(turn.choices || []);
+        setChooseOne(Boolean(turn.choose_one));
         setAnnouncement(stripCues(turn.reply));
         if (voice) voice.end();
         else afterSpeaking();
@@ -415,6 +417,7 @@ export default function App() {
             empty={!hasProducts}
             starters={categories}
             choices={busy ? [] : choices}
+            chooseOne={chooseOne}
             showHistory={resumedChat}
             planningOutfit={screen.planning_outfit}
             onToggleListening={toggleListening}

@@ -128,6 +128,7 @@ class CloudSqlShopperRepository(ShopperRepository, ConversationStore):
         )""",
         "ALTER TABLE cart_item ADD COLUMN IF NOT EXISTS kind TEXT",   # added later; older tables lack it
         "ALTER TABLE cart_item ADD COLUMN IF NOT EXISTS image_url TEXT",
+        "ALTER TABLE cart_item ADD COLUMN IF NOT EXISTS size TEXT",
         """CREATE TABLE IF NOT EXISTS wardrobe_item (
             user_id     TEXT NOT NULL,
             item_id     TEXT NOT NULL,
@@ -181,11 +182,11 @@ class CloudSqlShopperRepository(ShopperRepository, ConversationStore):
             for a, v, s, p, src, c, e in cursor.fetchall()
         ]
         cursor.execute(
-            "SELECT product_id, name, price, kind, image_url FROM cart_item WHERE user_id = %s ORDER BY position",
-            (user_id,))
+            "SELECT product_id, name, price, kind, image_url, size FROM cart_item WHERE user_id = %s "
+            "ORDER BY position", (user_id,))
         items = [CartItem(product_id=pid, name=name, price=None if price is None else float(price), kind=kind,
-                          image_url=image)
-                 for pid, name, price, kind, image in cursor.fetchall()]
+                          image_url=image, size=size)
+                 for pid, name, price, kind, image, size in cursor.fetchall()]
 
         cursor.execute("SELECT item_id, category, description, thumbnail FROM wardrobe_item "
                        "WHERE user_id = %s ORDER BY added_at", (user_id,))
@@ -256,12 +257,13 @@ class CloudSqlShopperRepository(ShopperRepository, ConversationStore):
                                (user_id, product_id))
         for position, item in enumerate(items, start=1):
             cursor.execute(
-                "INSERT INTO cart_item (user_id, product_id, name, price, kind, image_url, position) "
-                "VALUES (%s, %s, %s, %s, %s, %s, %s) "
+                "INSERT INTO cart_item (user_id, product_id, name, price, kind, image_url, size, position) "
+                "VALUES (%s, %s, %s, %s, %s, %s, %s, %s) "
                 "ON CONFLICT (user_id, product_id) DO UPDATE SET "
                 "name = EXCLUDED.name, price = EXCLUDED.price, kind = EXCLUDED.kind, "
-                "image_url = COALESCE(EXCLUDED.image_url, cart_item.image_url), position = EXCLUDED.position",
-                (user_id, item.product_id, item.name, item.price, item.kind, item.image_url, position))
+                "image_url = COALESCE(EXCLUDED.image_url, cart_item.image_url), size = EXCLUDED.size, "
+                "position = EXCLUDED.position",
+                (user_id, item.product_id, item.name, item.price, item.kind, item.image_url, item.size, position))
 
     # ----- the current conversation -----
 

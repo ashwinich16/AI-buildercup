@@ -19,12 +19,10 @@ from scout.domain import Product
 
 logger = logging.getLogger(__name__)
 
-MIN_OPTIONS = 3      # the shopper is always offered a choice of three, when the shop has them
-
-
 class OccasionFit(BaseModel):
     product_id: str
-    why: str = ""          # why it suits the occasion, in a few words
+    suits: bool = True     # would a good stylist wear it for this occasion at all?
+    why: str = ""          # why it suits the occasion (or why not), in a few words
 
 
 class _Ranking(BaseModel):
@@ -37,10 +35,12 @@ What the piece should be like: {looks_like}
 PRODUCTS FOUND IN THE SHOP
 {products}
 
-Put the products in order, the best for THIS occasion first: think of the setting, the weather it implies,
-what they will be doing, and how dressed up it is. Leave out any product that would clearly be wrong for
-it (for example heavy wool for a beach, or gym wear for a wedding). For each one you keep, give why it suits
-the occasion in at most eight plain words, from its real details. Use the ids exactly as given."""
+Put EVERY product in order, the best for THIS occasion first: think of the setting, the weather it implies,
+what they will be doing, and how dressed up it is. Set suits false for any that would be wrong for it (for
+example heavy wool for a beach, gym or safety wear for an office or a wedding); those go last. For each, give
+in at most eight plain words why it suits the occasion (or why not), from its real details. Judge by the
+product's real details, not only its kind: a smart leather boat shoe can suit an office. Use the ids exactly
+as given."""
 
 
 class OccasionRanker:
@@ -57,8 +57,8 @@ class OccasionRanker:
 
     def rank(self, occasion: str, piece: str, looks_like: str,
              products: list[Product]) -> tuple[list[Product], dict[str, str]]:
-        """The products best first for the occasion (clearly wrong ones left out, unless that would leave
-        nothing), and why each suits it, by product id."""
+        """The products best first for the occasion (ones that do not suit it last, never left out: they are
+        still there for "more options"), and why each that suits it does, by product id."""
         if not occasion or len(products) < 2:
             return products, {}
         listed = "\n".join(f"[{p.id}] {_describe(p)}" for p in products)
@@ -70,14 +70,13 @@ class OccasionRanker:
             logger.warning("Could not rank %s for the occasion: %s", piece, error)
             return products, {}
         by_id = {p.id: p for p in products}
-        kept = [fit for fit in ranking if fit.product_id in by_id]
-        kept = list({fit.product_id: fit for fit in kept}.values())     # each product once
-        if not kept:
+        fits = list({fit.product_id: fit for fit in ranking if fit.product_id in by_id}.values())   # each once
+        if not fits:
             return products, {}
-        ranked = [by_id[fit.product_id] for fit in kept]
-        # Too few left to choose from: the rest follow in search order, after the ones that suit it.
-        ranked += [p for p in products if p not in ranked][:max(MIN_OPTIONS - len(ranked), 0)]
-        return ranked, {fit.product_id: fit.why for fit in kept if fit.why}
+        fits.sort(key=lambda fit: not fit.suits)                 # stable: the stylist's order within each
+        ranked = [by_id[fit.product_id] for fit in fits]
+        ranked += [p for p in products if p.id not in {fit.product_id for fit in fits}]   # any it skipped
+        return ranked, {fit.product_id: fit.why for fit in fits if fit.suits and fit.why}
 
 
 def _describe(product: Product) -> str:

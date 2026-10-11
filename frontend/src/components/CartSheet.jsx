@@ -53,7 +53,10 @@ export default function CartSheet({ open, onClose, cart, suggestion, busy, onAsk
               <span className="cart-item__thumb" aria-hidden="true">
                 {item.image_url ? <img src={item.image_url} alt="" loading="lazy" /> : null}
               </span>
-              <span className="cart-item__name">{item.name}</span>
+              <span className="cart-item__name">
+                {item.name}
+                {item.size && <span className="cart-item__size">Size {item.size}</span>}
+              </span>
               <span className="cart-item__price">{formatPrice(item.price)}</span>
               <button
                 className="button button--ghost cart-item__remove"

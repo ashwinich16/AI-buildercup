@@ -128,6 +128,7 @@ class ChatTurn(ScreenState):
     reply: str
     action: Optional[str] = None      # "pause" (go quiet, keep listening) or "end" (stop listening)
     choices: list[str] = Field(default_factory=list)   # short answers to Scout's question, to tap
+    choose_one: bool = False                            # one tap answers it (a size), rather than tap several
 
 
 class ChatMessage(BaseModel):
@@ -241,7 +242,11 @@ class ScoutChatService:
             reply = "Sorry, I lost my train of thought. Could you say that again?"
             yield {"type": "delta", "text": reply}
         choices = turn.choices if turn and turn.question and not turn.ready_to_search else []
-        done = ChatTurn(reply=reply, action=action, choices=choices, **_screen_from_state(session.state).model_dump())
+        choose_one = bool(session.state.get(state_keys.PENDING_SIZE))
+        if choose_one:                                                  # waiting for a size: the sizes, to tap
+            choices = list(session.state.get(state_keys.SIZE_CHOICES) or [])
+        done = ChatTurn(reply=reply, action=action, choices=choices, choose_one=choose_one,
+                        **_screen_from_state(session.state).model_dump())
         yield {"type": "done", **done.model_dump(mode="json")}
 
     async def end_session(self, user_id: str, session_id: str) -> None:

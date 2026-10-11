@@ -31,10 +31,11 @@ from google.genai import types
 from pydantic import BaseModel, Field
 
 from scout.agents import state_keys
+from scout.domain.sizes import size_scale
 from scout.agents.model_io import content_text, response_json
 from scout.catalog import CatalogRepository, SearchQuery
 from scout.config import Settings
-from scout.domain import ShoppingNeed
+from scout.domain import Product, ShoppingNeed
 from scout.tools.retrieval import word_stems
 
 logger = logging.getLogger(__name__)
@@ -118,8 +119,12 @@ class TurnUnderstanding(BaseModel):
     owned_items: list[OwnedPiece] = Field(
         default_factory=list, max_length=8,
         description="Clothes, shoes or accessories they say they already own and have not mentioned before")
-    cart_action: Optional[Literal["view", "remove", "clear", "checkout"]] = Field(
-        default=None, description="For cart: what they want to do with it; clear = take everything out")
+    cart_action: Optional[Literal["view", "remove", "clear", "checkout", "size"]] = Field(
+        default=None, description="For cart: what they want to do with it; clear = take everything out; "
+                                  "size = change the size of an item already in the cart")
+    size: Optional[str] = Field(
+        default=None, description="A size they give, in their words (\"medium\", \"9\", \"32 waist\"): when choosing a "
+                                  "product, answering Scout's question about size, or for cart_action size")
     cart_positions: list[int] = Field(
         default_factory=list, max_length=10, description="For remove: numbers of the items in THEIR CART to take out; "
                                           "empty if it is not clear which")
@@ -165,6 +170,9 @@ STILL TO LOOK FOR (other things they asked for earlier, after the current one)
 
 ITEMS SCOUT SUGGESTED TO GO WITH THEIR CART (shown on screen; Scout named the first)
 {suggestion}
+
+SIZE SCOUT IS WAITING FOR
+{size_wait}
 
 CLOTHES THEY ALREADY OWN
 {wardrobe}
@@ -253,7 +261,8 @@ FOR THE SHOPPER'S NEW MESSAGE
 
 8. For reject: fill product_reference, product_position and reason. If the reason names a quality to avoid, add it to need.avoid as one or two plain words a product description would use. Set ready_to_search true so Scout can look for better options.
 
-9. For cart: keep the need unchanged, ready_to_search false, no question; set cart_action.
+9. For cart: keep the need unchanged, ready_to_search false, no question; set cart_action. To change the size of something in the cart, set cart_action size, cart_positions to that item and size.
+   Sizes: when SIZE SCOUT IS WAITING FOR names a product and they give a size, set intent choose and size (keep the need unchanged). If they ask about sizes or for help choosing one, set intent other and reply briefly using the sizes listed there; it is still waiting. When they choose a product and say its size at once, set size too.
    remove: set cart_positions to the numbers of the items in THEIR CART they mean, however they describe them (by number, name, colour, kind of product, price, or the one just discussed). If the cart has only one item, that is the one they mean. If it could be more than one item and they did not say which, leave cart_positions empty; Scout will ask.
    clear: they want everything taken out of the cart.
 
@@ -309,6 +318,7 @@ class ElicitationAgentBuilder:
             profile=state_keys.profile(state).to_prompt_text(),
             cart=state_keys.cart(state).to_prompt_text(),
             suggestion=_suggestion_text(state),
+            size_wait=_size_wait_text(state),
             wardrobe=_wardrobe_text(state),
             just_added=_just_added_text(state),
             outfit=_outfit_text(state),
@@ -556,6 +566,16 @@ def _gender_question(need: ShoppingNeed) -> str:
     """Asked only when the model skipped this question; it names the category as the catalog spells it."""
     kind = " or ".join(need.product_types) or need.category or "outfit"
     return f"Happy to help! Is this for a men's or a women's style of {kind}?"
+
+
+def _size_wait_text(state) -> str:
+    pending = state.get(state_keys.PENDING_SIZE)
+    if not pending:
+        return "nothing"
+    product = Product.model_validate(pending["product"])
+    scale = size_scale(product)
+    return (f"Scout asked which size of the {product.kind or 'item'} ({' '.join(product.title.split()[:8])}) "
+            f"they want, to add it to the cart. It comes in {scale.spoken if scale else 'one size'}.")
 
 
 def _kind_question(need: ShoppingNeed, categories: list[str]) -> str:

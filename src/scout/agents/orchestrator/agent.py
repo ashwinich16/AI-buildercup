@@ -53,7 +53,9 @@ from scout.agents.model_io import content_text
 from scout.agents.narration import NarrationTask
 from scout.domain import Capsule, CapsulePlan, NewPiece, Product, ShoppingNeed
 from scout.tools import CatalogOverviewBuilder, ProductReferenceResolver, ProductRetriever, RetrievalResult
+from scout.domain.sizes import read_size, scale_of_label, size_scale
 from scout.tools.occasion_fit import OccasionRanker
+from scout.tools.retrieval import same_listing_key
 from scout.tools.recommendations import Recommender, Suggestion, SuggestionRules
 from scout.tools.wardrobe import new_item
 
@@ -156,6 +158,15 @@ class ScoutOrchestrator(BaseAgent):
     async def _route(self, ctx: InvocationContext, turn: TurnUnderstanding):
         if state_keys.planning_outfit(ctx.session.state):
             turn = self._as_outfit_step(ctx, turn)
+        pending = ctx.session.state.get(state_keys.PENDING_SIZE)
+        if pending and turn.size and turn.intent in ("choose", "other") and not turn.about_suggestion:
+            product = Product.model_validate(pending["product"])      # the size for the product being added
+            turn = turn.model_copy(update={"intent": "choose", "reason": turn.reason or pending.get("reason")})
+            async for item in self._choose(ctx, turn, product if pending.get("suggested") else None, chosen=product):
+                yield item
+            return
+        if pending and turn.intent != "other":                          # they moved on without a size
+            yield self._update_state(ctx, {state_keys.PENDING_SIZE: None, state_keys.SIZE_CHOICES: None})
         suggestion = (state_keys.suggestion(ctx.session.state, turn.suggestion_position)
                       if turn.about_suggestion else None)
         if suggestion is not None and turn.intent in ("choose", "ask_about_product", "reject"):
@@ -171,7 +182,9 @@ class ScoutOrchestrator(BaseAgent):
             return
         if turn.intent == "reject":
             yield self._evidence("rejected", self._presented_product(ctx, turn.product_position), turn.reason)
-        if turn.intent in ("shop", "reject") and turn.ready_to_search:
+        if turn.intent == "shop" and turn.ready_to_search and self._same_search(ctx):
+            steps = self._more_options(ctx, [])      # "show me some other ones": what they have not heard yet
+        elif turn.intent in ("shop", "reject") and turn.ready_to_search:
             # After a rejection, only options they have not heard yet: repeating them is not "better options".
             steps = self._search_and_narrate(ctx, skip_seen=turn.intent == "reject")
         elif turn.question:
@@ -214,7 +227,18 @@ class ScoutOrchestrator(BaseAgent):
         result = await asyncio.to_thread(self.retriever.find, need, seen)
         logger.info("Retrieval for %r found %d (%d exact, relaxed: %s)", result.query_text,
                     len(result.products), len(result.exact_ids), result.relaxed)
+        if need.product_types and need.purpose and len(result.products) < 2 * PRODUCTS_TO_PRESENT:
+            # Few of that exact kind: other kinds in the category may suit the occasion just as well (loafers or
+            # boots for the office, not only dress shoes). They count as related; the ranking keeps the suitable.
+            wider = await asyncio.to_thread(self.retriever.find, need.model_copy(update={"product_types": []}),
+                                            seen | {p.id for p in result.products})
+            result = result.model_copy(update={"products": [*result.products, *wider.products]})
         result, fit_notes = await asyncio.to_thread(self._rank_for_occasion, need, result)
+        heard = set(state.get(state_keys.SEEN) or [])
+        if heard and not seen:     # a changed request ("cheaper"): ones they have not heard yet come first
+            heard_names = {same_listing_key(p) for p in state_keys.shortlist(state).values() if p.id in heard}
+            result = result.model_copy(update={"products": sorted(
+                result.products, key=lambda p: p.id in heard or same_listing_key(p) in heard_names)})
 
         # They rejected everything that really fits (e.g. every black pair): say so honestly, keep what they heard,
         # rather than quietly offering things that miss what they asked for.
@@ -237,9 +261,18 @@ class ScoutOrchestrator(BaseAgent):
             state_keys.NARRATION_TASK: NarrationTask.PRESENT_OPTIONS.value,
             state_keys.FOCUS_PRODUCT: None,
             state_keys.FIT_NOTES: {**(state.get(state_keys.FIT_NOTES) or {}), **fit_notes},
+            state_keys.SEARCHED_NEED: need.model_dump(),
         })
         async for event in self.narration.run_async(ctx):
             yield event
+
+    @staticmethod
+    def _same_search(ctx: InvocationContext) -> bool:
+        """Is the need exactly what the options on screen were found for (they asked again, or for others)?"""
+        state = ctx.session.state
+        searched = state.get(state_keys.SEARCHED_NEED)
+        return bool(searched and state.get(state_keys.SHORTLIST)) and \
+            ShoppingNeed.model_validate(searched) == state_keys.need(state)
 
     def _rank_for_occasion(self, need: ShoppingNeed, result: RetrievalResult) -> tuple[RetrievalResult, dict]:
         """When they named an occasion (a wedding, the gym), the products best for it first; search matches
@@ -266,12 +299,15 @@ class ScoutOrchestrator(BaseAgent):
         kept = [presented[n - 1] for n in keep_positions if 1 <= n <= len(presented)]
         wanted = PRODUCTS_TO_PRESENT - len(kept) if kept else PRODUCTS_TO_PRESENT
         seen = list(dict.fromkeys([*(state.get(state_keys.SEEN) or []), *presented]))
-        unseen = [p for p in shortlist.values() if p.id not in seen and self.retriever.fits(need, p)]
+        heard = {same_listing_key(p) for p in shortlist.values() if p.id in seen}   # a second listing is no news
+        unseen = [p for p in shortlist.values()
+                  if p.id not in seen and same_listing_key(p) not in heard and self.retriever.fits(need, p)]
         delta: dict = {}
 
         if len(unseen) < wanted:        # not enough left: search again, skipping what we have
             extra = await asyncio.to_thread(self.retriever.find, need, set(seen) | set(shortlist))
-            new = [p for p in extra.products if self.retriever.fits(need, p)]   # never over budget to top up
+            new = [p for p in extra.products                 # never over budget to top up
+                   if self.retriever.fits(need, p) and same_listing_key(p) not in heard]
             if new:
                 unseen += new
                 delta[state_keys.SHORTLIST] = [p.model_dump() for p in [*shortlist.values(), *new]]
@@ -336,12 +372,13 @@ class ScoutOrchestrator(BaseAgent):
         async for event in self.narration.run_async(ctx):
             yield event
 
-    async def _choose(self, ctx: InvocationContext, turn: TurnUnderstanding, suggested: Optional[Product] = None):
+    async def _choose(self, ctx: InvocationContext, turn: TurnUnderstanding, suggested: Optional[Product] = None,
+                      chosen: Optional[Product] = None):
         """Add a presented product (or the `suggested` item) to the cart, with one item that goes with it."""
         if suggested is None and not ctx.session.state.get(state_keys.SHORTLIST):
             yield self._say(ctx, NOTHING_SHOWN_YET)
             return
-        product = suggested or self._presented_product(ctx, turn.product_position)
+        product = suggested or chosen or self._presented_product(ctx, turn.product_position)
         if product is None:
             yield self._say(ctx, "Lovely! Which one would you like: the first, second or third?")
             return
@@ -363,10 +400,31 @@ class ScoutOrchestrator(BaseAgent):
             return
 
         cart = state_keys.cart(ctx.session.state)
-        added = cart.add(product)
+        scale = size_scale(product)
+        size, remembered = self._size_for(ctx, scale, turn)
+        in_cart = any(item.product_id == product.id for item in cart.items)
+        if scale is not None and size is None and not in_cart:
+            async for item in self._ask_size(ctx, product, scale, suggested is not None, turn.reason):
+                yield item
+            return
+        label = scale.label(size) if scale is not None and size else None
+        added = cart.add(product, label)
+        event = {"action": "added" if added else "already_in_cart", "item": product.title}
+        if label and added:
+            event["size"] = label
+            if remembered:
+                event["size_note"] = "the size they gave earlier for this kind; they can change it"
+        elif label and turn.size and cart.set_size(product.id, label):
+            event = {"action": "size_changed", "item": product.title, "size": label}
+        known = dict(ctx.session.state.get(state_keys.KNOWN_SIZES) or {})
+        if scale is not None and size:
+            known[scale.key] = size
         delta = {
             state_keys.CART: cart.model_dump(),
-            state_keys.CART_EVENT: {"action": "added" if added else "already_in_cart", "item": product.title},
+            state_keys.CART_EVENT: event,
+            state_keys.PENDING_SIZE: None,
+            state_keys.SIZE_CHOICES: None,
+            state_keys.KNOWN_SIZES: known,
             state_keys.FOCUS_PRODUCT: product.id,
             state_keys.NARRATION_TASK: NarrationTask.CART_UPDATE.value,
             state_keys.SUGGESTION: None,
@@ -387,6 +445,44 @@ class ScoutOrchestrator(BaseAgent):
             yield event
         yield self._evidence("chose", product, turn.reason)
 
+    def _size_for(self, ctx: InvocationContext, scale, turn: TurnUnderstanding) -> tuple[Optional[str], bool]:
+        """The size to add a product in: the one they just gave, else the one they gave before for this kind
+        (shoes, waist, tops); and whether it was remembered rather than just said."""
+        if scale is None:
+            return None, False
+        if turn.size:
+            return read_size(turn.size, scale), False
+        known = (ctx.session.state.get(state_keys.KNOWN_SIZES) or {}).get(scale.key)
+        return (known, True) if known in scale.options else (None, False)
+
+    async def _ask_size(self, ctx: InvocationContext, product: Product, scale, suggested: bool,
+                        reason: Optional[str]):
+        """Ask which size to add it in. The catalog lists no sizes, so every usual size is taken to be in stock."""
+        kind = product.kind or "item"
+        question = f"Great choice! What size would you like in the {kind}? They come in {scale.spoken}."
+        yield self._update_state(ctx, {
+            state_keys.PENDING_SIZE: {"product": product.model_dump(), "suggested": suggested, "reason": reason},
+            state_keys.SIZE_CHOICES: scale.options,
+            state_keys.FOCUS_PRODUCT: product.id,
+        })
+        yield self._say(ctx, question)
+
+    @staticmethod
+    def _resize(cart, turn: TurnUnderstanding) -> dict:
+        """Change the size of an item in the cart (the only item, or the one they named)."""
+        positions = turn.cart_positions or ([1] if len(cart.items) == 1 else [])
+        if len(positions) != 1 or not 1 <= positions[0] <= len(cart.items):
+            return {"action": "unclear_which_item"}
+        item = cart.items[positions[0] - 1]
+        if not item.size:
+            return {"action": "needs_no_size", "item": item.name}
+        scale = scale_of_label(item.size)
+        size = read_size(turn.size or "", scale)
+        if size is None:
+            return {"action": "size_unclear", "item": item.name, "sizes": scale.spoken}
+        cart.set_size(item.product_id, scale.label(size))
+        return {"action": "size_changed", "item": item.name, "size": scale.label(size)}
+
     async def _cart(self, ctx: InvocationContext, turn: TurnUnderstanding):
         cart = state_keys.cart(ctx.session.state)
         action = turn.cart_action or "view"
@@ -399,6 +495,8 @@ class ScoutOrchestrator(BaseAgent):
             yield self._say(ctx, "Your cart is empty right now. What would you like to find?")
             return
 
+        if action == "size":
+            event = self._resize(cart, turn)
         if action in ("remove", "clear"):
             removed = cart.clear() if action == "clear" else cart.remove(turn.cart_positions)
             if removed:
@@ -805,6 +903,13 @@ class ScoutOrchestrator(BaseAgent):
         presented = len(state.get(state_keys.PRESENTED) or [])
         base = {"need": need, "ready_to_search": False, "understood": text}
 
+        pending = state.get(state_keys.PENDING_SIZE)
+        if pending:                                   # the answer to "what size?" (or a size button)
+            scale = size_scale(Product.model_validate(pending["product"]))
+            size = read_size(text, scale) if scale else None
+            if size and len(text.split()) <= 4:
+                return TurnUnderstanding(intent="choose", size=size, **base)
+
         for pattern, intent in _FAST_POSITIONAL:
             match = pattern.match(text)
             if match:
@@ -902,7 +1007,8 @@ _FAST_POSITIONAL = [
 _FAST_SUGGESTION_N = re.compile(r"^(?P<verb>add|tell me about) suggestion (?P<n>[1-9])( to my cart)?$")
 _FAST_ADD_SUGGESTED = re.compile(r"^add the suggested [a-z' -]+ to my cart$")
 _FAST_SIMILAR_TO_SUGGESTED = re.compile(r"^show me other options like the suggested [a-z' -]+$")
-_FAST_MORE = re.compile(r"^(show me )?more options( please)?$")
+_FAST_MORE = re.compile(r"^(please )?((show|give|find) me |can you show me |let me see |any )?(some |a few )?"
+                        r"(more|other|different|some other)( options| ones| products| items| choices)?( please)?$")
 _FAST_COMPARE = re.compile(r"^compare (these|them)( for me)?( please)?$")
 _ORDINALS = {"first": 1, "1st": 1, "one": 1, "second": 2, "2nd": 2, "two": 2,
              "third": 3, "3rd": 3, "three": 3, "fourth": 4, "4th": 4, "four": 4}

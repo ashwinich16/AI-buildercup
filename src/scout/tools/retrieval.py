@@ -251,6 +251,11 @@ def word_stems(text: str) -> set[str]:
     return stems
 
 
+def same_listing_key(product: Product) -> str:
+    """The same product listed twice (often at two prices) has the same title: to a shopper it is one product."""
+    return _title_key(product.title)
+
+
 def _title_key(title: str) -> str:
     """Titles compared without case, punctuation or bracketed notes such as a size or colour."""
     return re.sub(r"[^a-z0-9]+", "", re.sub(r"[\(\[].*?[\)\]]", " ", (title or "").lower()))[:60]
