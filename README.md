@@ -221,19 +221,54 @@ PYTHONPATH=src uvicorn scout.api.main:app --port 8000      # then open http://lo
 
 ## Deploy to Cloud Run
 
-```bash
-gcloud run deploy scout --source . --region us-central1 \
-  --set-env-vars "$(grep -v '^#' .env | grep -v '^$' | paste -sd, -)" \
-  --session-affinity
+One Cloud Run service: the Dockerfile builds the React app and starts the API. Run these once, from the
+repository root, in PowerShell (`gcloud` logged in with `gcloud auth login`).
+
+**1. Project and APIs**
+
+```powershell
+gcloud config set project scout-hackathon
+gcloud services enable run.googleapis.com cloudbuild.googleapis.com artifactregistry.googleapis.com `
+  aiplatform.googleapis.com discoveryengine.googleapis.com texttospeech.googleapis.com `
+  sqladmin.googleapis.com secretmanager.googleapis.com
 ```
 
-The Dockerfile builds the React app and starts the API, so no separate frontend deploy is needed.
-Names, preferences, carts and wardrobes are kept in Cloud SQL (`SCOUT_DB_*`), so they survive restarts and are
-shared by every instance. The current conversation lives in the instance's memory and is also saved after every
-turn as one compact summary row (table `conversation`, created automatically; rows idle for a week are deleted),
-so it carries on after a restart or on another instance. `--session-affinity` still keeps a shopper on one
-instance, which avoids rebuilding it. The service account needs: Vertex AI User, Discovery Engine Viewer,
-Cloud Text-to-Speech access, Cloud SQL Client, Secret Manager Secret Accessor.
+**2. A service account for Scout, with only what it needs**
+
+```powershell
+gcloud iam service-accounts create scout-run --display-name "Scout on Cloud Run"
+$SA = "scout-run@scout-hackathon.iam.gserviceaccount.com"
+foreach ($role in "roles/aiplatform.user", "roles/discoveryengine.viewer", "roles/cloudsql.client",
+                  "roles/secretmanager.secretAccessor", "roles/serviceusage.serviceUsageConsumer") {
+  gcloud projects add-iam-policy-binding scout-hackathon --member "serviceAccount:$SA" --role $role
+}
+```
+
+**3. Deploy** (settings come from your `.env`; empty lines and comments are skipped)
+
+```powershell
+$SA = "scout-run@scout-hackathon.iam.gserviceaccount.com"
+$envs = (Get-Content .env | Where-Object { $_ -match '^[A-Z_]+=.+' }) -join ','
+gcloud run deploy scout --source . --region us-central1 --service-account $SA `
+  --set-env-vars $envs --allow-unauthenticated `
+  --session-affinity --min-instances 1 --max-instances 1 --memory 2Gi --cpu 2 --timeout 600
+```
+
+It prints the address (`https://scout-….run.app`). Redeploy after a change with the same step 3.
+
+Why these flags:
+- `--allow-unauthenticated`: anyone can open the page; Scout's own sign-in (demo shoppers or Google) decides
+  who is shopping.
+- `--min-instances 1 --max-instances 1 --session-affinity`: one server that is always warm (no cold start in
+  a demo), so a conversation always lives on the same server. Conversations are also saved in Cloud SQL
+  (table `conversation`), so they survive a redeploy.
+- `--region us-central1`: next to the Gemini models (`GOOGLE_CLOUD_LOCATION`), which Scout calls several times
+  per turn. Cloud SQL is called less often (and saves in the background).
+
+With Google sign-in (`SCOUT_AUTH_MODE=firebase`), add the `run.app` address in Firebase console →
+Authentication → Settings → Authorized domains.
+
+On a phone, open the `https://` address in Chrome, allow the microphone, then ⋮ → Add to Home screen.
 
 ## Troubleshooting
 
