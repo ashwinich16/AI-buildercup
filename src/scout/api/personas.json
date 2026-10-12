@@ -20,7 +20,8 @@
   {
     "id": "guest",
     "name": "New shopper",
-    "description": "No history yet. Scout learns your taste as you shop.",
+    "description": "A fresh start every time, with no history. Scout learns your taste as you shop.",
+    "guest": true,
     "preferences": []
   }
 ]

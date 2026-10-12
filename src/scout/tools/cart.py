@@ -18,18 +18,28 @@ class CartItem(BaseModel):
     name: str
     price: Optional[float] = None
     kind: Optional[str] = None          # e.g. "jeans": long titles are cut, and the kind must not be guessed
+    image_url: Optional[str] = None     # a small photo for the cart list
+    size: Optional[str] = None          # as shown and said, e.g. "UK 9", "32 waist", "M"; None if it needs none
 
 
 class Cart(BaseModel):
     items: list[CartItem] = Field(default_factory=list)
 
-    def add(self, product: Product) -> bool:
+    def add(self, product: Product, size: Optional[str] = None) -> bool:
         """False if it was already in the cart."""
         if any(item.product_id == product.id for item in self.items):
             return False
         self.items.append(CartItem(product_id=product.id, name=" ".join(product.title.split()[:10]),
-                                   price=product.price, kind=product.kind or None))
+                                   price=product.price, kind=product.kind or None,
+                                   image_url=product.image_urls[0] if product.image_urls else None, size=size))
         return True
+
+    def set_size(self, product_id: str, size: str) -> bool:
+        """Change the size of an item in the cart; False if it is not there."""
+        item = next((i for i in self.items if i.product_id == product_id), None)
+        if item is not None:
+            item.size = size
+        return item is not None
 
     def remove(self, positions: list[int]) -> list[CartItem]:
         """Take out the items at these 1-based positions; returns what was removed."""
@@ -53,7 +63,7 @@ class Cart(BaseModel):
     def to_prompt_text(self) -> str:
         if not self.items:
             return "The cart is empty."
-        lines = [f"{n}. {item.kind + ': ' if item.kind else ''}{item.name} "
+        lines = [f"{n}. {item.kind + ': ' if item.kind else ''}{item.name}{', size ' + item.size if item.size else ''} "
                  f"({f'${item.price:.2f}' if item.price is not None else 'price not listed'})"
                  for n, item in enumerate(self.items, start=1)]
         note = " (some prices not listed)" if self.has_unpriced else ""

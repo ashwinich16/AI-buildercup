@@ -76,7 +76,7 @@ class PreferenceAgentBuilder:
         tuning = self._settings.tuning("preference")
         return LlmAgent(
             name="preference",
-            model=self._settings.model_for("preference"),
+            model=self._settings.llm("preference"),
             description="Learns lasting shopper preferences after each turn.",
             instruction=self._instruction,
             include_contents="none",

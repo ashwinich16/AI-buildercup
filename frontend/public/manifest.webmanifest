@@ -1,0 +1,16 @@
+{
+  "name": "Scout · Your shopping companion",
+  "short_name": "Scout",
+  "description": "Talk to Scout to find products and plan outfits from your own wardrobe.",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "orientation": "portrait",
+  "background_color": "#e6f2fc",
+  "theme_color": "#0b0b0c",
+  "icons": [
+    { "src": "/icon-192.png", "sizes": "192x192", "type": "image/png" },
+    { "src": "/icon-512.png", "sizes": "512x512", "type": "image/png" },
+    { "src": "/icon-maskable.png", "sizes": "512x512", "type": "image/png", "purpose": "maskable" }
+  ]
+}

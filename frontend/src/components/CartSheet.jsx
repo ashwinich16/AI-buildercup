@@ -50,7 +50,13 @@ export default function CartSheet({ open, onClose, cart, suggestion, busy, onAsk
         <ol className="cart-items" role="list" aria-label={`${items.length} ${items.length === 1 ? "item" : "items"}`}>
           {items.map((item, index) => (
             <li key={item.product_id} className="cart-item">
-              <span className="cart-item__name">{item.name}</span>
+              <span className="cart-item__thumb" aria-hidden="true">
+                {item.image_url ? <img src={item.image_url} alt="" loading="lazy" /> : null}
+              </span>
+              <span className="cart-item__name">
+                {item.name}
+                {item.size && <span className="cart-item__size">Size {item.size}</span>}
+              </span>
               <span className="cart-item__price">{formatPrice(item.price)}</span>
               <button
                 className="button button--ghost cart-item__remove"

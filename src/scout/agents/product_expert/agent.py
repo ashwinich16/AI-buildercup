@@ -65,7 +65,7 @@ class ProductExpertAgentBuilder:
         tuning = self._settings.tuning("product_expert")
         return LlmAgent(
             name="product_expert",
-            model=self._settings.model_for("product_expert"),
+            model=self._settings.llm("product_expert"),
             description="Looks at one product's photos and facts; describes it or answers questions about it.",
             instruction=self._instruction,
             include_contents="none",            # the product and the current question are all it needs

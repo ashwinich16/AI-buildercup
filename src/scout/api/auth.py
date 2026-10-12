@@ -12,6 +12,7 @@ Each authenticator also tells the frontend how to sign in (`client_config`),
 so the same React build works in either mode.
 """
 
+import re
 from abc import ABC, abstractmethod
 
 from fastapi import HTTPException, Request
@@ -55,6 +56,9 @@ class Authenticator(ABC):
 
 class DemoPersonaAuthenticator(Authenticator):
     HEADER = "X-Scout-User"
+    # A guest persona is picked as "<persona id>-<random>": a new shopper each time, with nothing from
+    # anyone who tried Scout before, and no name to greet them by.
+    GUEST = re.compile(r"^(?P<persona>[a-z]+)-[0-9a-f]{8,32}$")
 
     def __init__(self, personas: dict[str, Persona]):
         self._personas = personas
@@ -63,15 +67,17 @@ class DemoPersonaAuthenticator(Authenticator):
         return request.headers.get(self.HEADER, "")
 
     async def verify(self, credential: str) -> Shopper:
-        persona = self._personas.get((credential or "").strip())
-        if persona is None:
+        credential = (credential or "").strip()
+        guest = self.GUEST.match(credential)
+        persona = self._personas.get(guest.group("persona") if guest else credential)
+        if persona is None or bool(guest) != persona.guest:
             raise HTTPException(status_code=401, detail="Pick a demo shopper first.")
-        return Shopper(id=persona.id, name=persona.name)
+        return Shopper(id=credential, name="" if persona.guest else persona.name)
 
     def client_config(self) -> dict:
         return {
             "mode": "demo",
-            "personas": [{"id": p.id, "name": p.name, "description": p.description}
+            "personas": [{"id": p.id, "name": p.name, "description": p.description, "guest": p.guest}
                          for p in self._personas.values()],
         }
 

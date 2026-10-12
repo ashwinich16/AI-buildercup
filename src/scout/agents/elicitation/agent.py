@@ -31,11 +31,11 @@ from google.genai import types
 from pydantic import BaseModel, Field
 
 from scout.agents import state_keys
+from scout.domain.sizes import size_scale
 from scout.agents.model_io import content_text, response_json
 from scout.catalog import CatalogRepository, SearchQuery
 from scout.config import Settings
-from scout.domain import ShoppingNeed
-from scout.domain.outfit import MAX_PIECES
+from scout.domain import Product, ShoppingNeed
 from scout.tools.retrieval import word_stems
 
 logger = logging.getLogger(__name__)
@@ -51,12 +51,17 @@ Intent = Literal[
     "choose",             # has decided on a product (Scout adds it to the cart)
     "cart",               # wants to hear, change or check out their cart
     "see_suggestion",     # wants to see other items like the one Scout suggested to go with their cart
-    "outfit",             # wants help putting an outfit together for an occasion, or is steering one in progress
+    "outfit",             # wants their outfits planned for a trip, a week or an event, or is steering the plan
     "pause",              # wants Scout to stop talking or wait, without ending the conversation
     "end_conversation",   # wants to finish the conversation for now
     "reject",             # does not like a presented product
     "other",              # anything else: greetings, thanks, help, off-topic
 ]
+
+
+class OwnedPiece(BaseModel):
+    category: str = Field(description="One of the catalog categories")
+    description: str = Field(description="The piece in plain words: colour, kind, material, how formal")
 
 
 class TurnUnderstanding(BaseModel):
@@ -67,7 +72,17 @@ class TurnUnderstanding(BaseModel):
         description="Details that would still change which products fit; empty when the need is clear")
     ready_to_search: bool = Field(description="True when the need is clear enough to look for products")
     question: Optional[str] = Field(default=None, description="ONE short, friendly question, only if not ready")
+    choices: list[str] = Field(
+        default_factory=list, max_length=5,
+        description="With a question: two to five very short answers the shopper can tap (a few words each)")
     understood: str = Field(description="One short sentence restating what the shopper wants now")
+    style_answer: Optional[Literal["men", "women", "any"]] = Field(
+        default=None, description="Only when your last question asked whose style it is: the style their reply "
+                                  "names (any = it does not matter); otherwise null")
+    next_up: list[str] = Field(
+        default_factory=list, max_length=5,
+        description="Other kinds of product they asked for in this message besides the one in need, as catalog "
+                    "categories, to look at afterwards")
     unavailable_category: Optional[str] = Field(
         default=None, description="A kind of product the shopper asked for that is not in the catalog")
     product_reference: Optional[str] = Field(
@@ -75,24 +90,41 @@ class TurnUnderstanding(BaseModel):
     product_position: Optional[int] = Field(
         default=None, description="Number (1, 2, 3...) of the product they mean in PRODUCTS YOU JUST PRESENTED; "
                                   "null if it is not clear which one")
+    keep_positions: list[int] = Field(
+        default_factory=list, max_length=10,
+        description="For more_options: numbers of the presented options they want to keep; the others are "
+                    "replaced. Empty when all of them should be replaced")
     product_positions: list[int] = Field(
         default_factory=list, max_length=10, description="For compare: numbers of the products to compare; empty means all presented")
     reason: Optional[str] = Field(default=None, description="For choose/reject: why, in the shopper's words")
     about_suggestion: bool = Field(
         default=False, description="True when the product they mean is the ITEM SCOUT SUGGESTED to go with "
                                    "their cart, not one of the presented options")
-    outfit_action: Optional[Literal["start", "skip", "add_extra", "finish", "add_to_cart", "leave"]] = Field(
-        default=None, description="For outfit: start a new one, skip the piece being chosen, accept the extra piece "
-                                  "Scout offered, finish without more pieces, put the whole outfit in the cart, or "
-                                  "leave outfit planning for regular shopping")
-    outfit_drop: list[str] = Field(
-        default_factory=list, max_length=MAX_PIECES,
-        description="While an outfit is in progress: catalog categories they say they do not want in it")
-    outfit_pieces: list[str] = Field(
-        default_factory=list, max_length=MAX_PIECES,
-        description="For outfit start: the catalog categories they asked to have in it; empty if they did not say")
-    cart_action: Optional[Literal["view", "remove", "clear", "checkout"]] = Field(
-        default=None, description="For cart: what they want to do with it; clear = take everything out")
+    suggestion_position: Optional[int] = Field(
+        default=None, description="When about_suggestion: the number of the suggested item they mean (1 is the "
+                                  "first); null if it is the first or not clear")
+    outfit_action: Optional[Literal["start", "swap", "skip", "add", "add_to_cart", "leave"]] = Field(
+        default=None, description="For outfit: plan (or re-plan) the looks, other products for one new piece, skip "
+                                  "the piece being chosen, add a piece to the outfit, put the new pieces in the "
+                                  "cart (the outfit is finished), or leave planning for regular shopping")
+    activities: list[str] = Field(
+        default_factory=list, max_length=8,
+        description="For outfit start: what they will do or where they will go, as they said it (for a single "
+                    "event, the event itself); empty only if it is not clear yet")
+    swap_piece: Optional[str] = Field(
+        default=None, description="For swap, skip or add: the catalog category of the piece they mean")
+    swap_wish: Optional[str] = Field(
+        default=None, description="For swap: what they want instead, in plain words a product description would "
+                                  "use; null if they did not say")
+    owned_items: list[OwnedPiece] = Field(
+        default_factory=list, max_length=8,
+        description="Clothes, shoes or accessories they say they already own and have not mentioned before")
+    cart_action: Optional[Literal["view", "remove", "clear", "checkout", "size"]] = Field(
+        default=None, description="For cart: what they want to do with it; clear = take everything out; "
+                                  "size = change the size of an item already in the cart")
+    size: Optional[str] = Field(
+        default=None, description="A size they give, in their words (\"medium\", \"9\", \"32 waist\"): when choosing a "
+                                  "product, answering Scout's question about size, or for cart_action size")
     cart_positions: list[int] = Field(
         default_factory=list, max_length=10, description="For remove: numbers of the items in THEIR CART to take out; "
                                           "empty if it is not clear which")
@@ -133,38 +165,54 @@ WHAT YOU KNOW ABOUT THIS SHOPPER (from earlier conversations)
 THEIR CART
 {cart}
 
-ITEM SCOUT SUGGESTED TO GO WITH THEIR CART
+STILL TO LOOK FOR (other things they asked for earlier, after the current one)
+{next_up}
+
+ITEMS SCOUT SUGGESTED TO GO WITH THEIR CART (shown on screen; Scout named the first)
 {suggestion}
 
-OUTFIT YOU ARE PUTTING TOGETHER WITH THEM
+SIZE SCOUT IS WAITING FOR
+{size_wait}
+
+CLOTHES THEY ALREADY OWN
+{wardrobe}
+
+PIECES THEY JUST SHOWED YOU IN PHOTOS
+{just_added}
+
+HOW THEY ARE SHOPPING
+{mode}
+
+OUTFIT PLAN ON THE BOARD
 {outfit}
 
 FOR THE SHOPPER'S NEW MESSAGE
 
 1. intent: decide what the shopper is trying to achieve right now.
    - shop: they are describing, changing or narrowing down what they want, including a short reply that answers your last question.
-   - more_options: they want to hear different or additional options for the same need, without changing the need. Do not ask a question; Scout will present the next options. If they also change what they want (a price limit, a colour, a detail), it is still more_options: update the need with the change.
+   - more_options: they want to hear different or additional options for the same need, without changing the need. Do not ask a question; Scout will present the next options. If they also change what they want (a price limit, a colour, a detail), it is still more_options: update the need with the change. When they want to keep some of the presented options and replace only the others, it is still more_options: put the numbers of the ones to keep in keep_positions.
    - ask_about_product: they want one presented product described (including its look, picture or photo), or have a question about it. Scout CAN look at product photos, so this is never impossible.
    - compare: they want two or more presented products compared.
    - choose: they have decided on a product they want to buy.
    - cart: they want to hear what is in their cart, take one or more things out of it, empty it, or finish and pay.
-   - The ITEM SCOUT SUGGESTED (above, if any) is a product they can act on just like the presented ones. When the product they mean is that item, set about_suggestion true, keep the need unchanged, ready_to_search false, no question, and pick the intent by what they want to do with it:
+   - The ITEMS SCOUT SUGGESTED (above, if any) are products they can act on just like the presented ones. When the product they mean is one of those items, set about_suggestion true and suggestion_position to its number (by number, kind, colour or name), keep the need unchanged, ready_to_search false, no question, and pick the intent by what they want to do with it:
        choose: have it added to the cart. If Scout offered it in its last reply, a plain yes means choose.
        ask_about_product: a question about it, or to hear it described.
        see_suggestion: to see other items like it.
        reject: they do not want it. Write reply: a short, easy-going acknowledgement (no pressure, and invite what is next).
    - reject: they do not like a presented product.
-   - outfit: they want help putting together an outfit or a look for an occasion or event, or they are steering the outfit in progress (above). Set outfit_action:
-       start: a new outfit. Put the occasion in need.purpose, whose style in need.gender, a budget for the whole outfit in need.budget_max, leave need.category null, and put the catalog categories they asked to have in it in outfit_pieces, in the order they asked (empty if they did not say). Do not ask about kinds or pieces: Scout's stylist plans them.
+   - outfit: they want what to wear planned for a trip, a week, an event or several occasions, or they are steering the plan on the board (above). Asking for a whole outfit or look ("dress me for my first day at the office", "a formal outfit for a wedding") is outfit even for a single event; asking for one kind of product ("a formal shirt") is shop. Scout's stylist plans looks from the clothes they own and suggests only the few new pieces worth buying. Set outfit_action:
+       start: plan the looks, or plan them again with a change (another occasion, more days, a different feel for a day). Put the trip or occasion, its days and what they will do in need.purpose, whose style in need.gender, a budget for all the new pieces in need.budget_max, any wish about the looks in need.looking_for, and leave need.category null. Put the places they will visit or what they will do there in activities.
+         The stylist needs only the occasion and what they will do. Many occasions already say it (a day at the office, a job interview, a wedding, a dinner): then put that in activities and do not ask. Only when it is unclear what they will be doing (a trip, a holiday, a weekend away), ask just that, in one short question, and put two to five places or activities that fit it in choices. Never ask about anything else for a plan (not dates, pieces, kinds or colours).
+       swap: they want a different product, or other options, for one of the NEW PIECES on the board. Put its category in swap_piece (the piece being chosen now, if they do not say) and what they want instead in swap_wish.
        skip: they do not want the piece being chosen now.
-       add_extra: they accept the extra piece Scout offered to finish the look.
-       finish: they decline the extra piece, or say the outfit is complete.
-       add_to_cart: they want the whole outfit put in their cart.
-       leave: they want to stop planning the outfit and go back to regular shopping.
-     While an outfit is in progress (above), they are planning it until they ask to leave:
-       - Naming one of the presented options in any way (its number, colour, pattern, a detail) is choose: it goes into the outfit.
-       - Asking for a different kind of piece, or cheaper or different options, is shop as usual: the search is for the outfit.
-       - When they say they do not want a piece (even while asking for another one instead), put its category in outfit_drop.
+       add: they want another kind of piece in the outfit (shoes, a bag...). Put its catalog category in swap_piece and what they want it to be like in swap_wish.
+     While they are planning an outfit (HOW THEY ARE SHOPPING), everything they ask for is for the outfit until they finish it or ask for regular shopping: another kind of product is add, a different option or price for a piece is swap, and pointing at clothes they own is start (plan again, using them). Never reply with a generic line while they are planning.
+     While the plan says a piece is being chosen now, naming one of the presented options in any way (its number, colour, a detail) is choose: it goes into the outfit.
+       add_to_cart: they want the new pieces put in their cart.
+       leave: they want to stop planning and go back to regular shopping.
+   - If PIECES THEY JUST SHOWED YOU lists anything, start your question or reply by briefly saying what you see (name up to four pieces, then how many more), so they know you looked.
+   - owned_items: whatever the intent, when they say they already own clothes, shoes or accessories not listed in CLOTHES THEY ALREADY OWN, list each one with its catalog category and a short description in their words. Owning something is never a reason to search for it.
    - pause: they want Scout to stop talking, be quiet or wait for a moment, without leaving.
    - end_conversation: they want to finish talking for now or say goodbye.
    - other: anything else.
@@ -172,7 +220,8 @@ FOR THE SHOPPER'S NEW MESSAGE
 2. need: return the COMPLETE updated need. Keep everything already known; add or change only what this message says. Never invent details. category must be one of the catalog categories, or null. When the shopper names a kind of product, use the categories in WHAT THE SHOP ACTUALLY HAS as a strong hint for which catalog category it belongs to.
    product_types: the specific kind(s) they want, spelled exactly as in PRODUCT TYPES IN THE SHOP. Fill it only when their words clearly mean one of those kinds. A general word that people use for several of the shop's kinds leaves product_types empty. When they accept another kind you offered, add it.
    purpose: the occasion or use, in their words. When it points to particular kinds the shop has for that person (see "Kinds of ..." in WHAT THE SHOP ACTUALLY HAS), also put those kinds in product_types, so the search looks for the right kind.
-   gender: whose STYLE the item is, and only from what the shopper says. Naming the style, or naming the person it is for, settles it; saying it does not matter means "any". Never infer it from their name, voice, way of talking, profile, or from who is talking: an item they want for themselves does NOT settle it, because anyone can shop for any style. When they move on to a different kind of product, keep the gender only if they make clear it is for the same person. When your last question asked whose style it is, a reply that names a style answers it: set gender from it, even when the reply is only a few words.
+   gender: whose STYLE the item is, and only from what the shopper says. When they correct themselves ("for a woman... no, actually men's"), in one message or across messages, the LAST thing they say wins. Naming the style, or naming the person it is for, settles it; saying it does not matter means "any". Never infer it from their name, voice, way of talking, profile, or from who is talking: an item they want for themselves does NOT settle it, because anyone can shop for any style. When they move on to a different kind of product, keep the gender only if they make clear it is for the same person. When your last question asked whose style it is, a reply that names a style answers it: set gender from it, even when the reply is only a few words.
+   budget_min / budget_max: the price range they give, as a lower and an upper limit (a single limit sets only that one; a range sets both). A new limit of one kind replaces the old one of that kind.
    must_have: every specific quality they ask the product to have, in plain words a product description would use. When they ask for a different value of a quality they already gave, it replaces the old one.
 
 3. Decide whether the need is clear. Think about it like a friend would:
@@ -185,6 +234,7 @@ FOR THE SHOPPER'S NEW MESSAGE
    - What it is for (the occasion or use) is unclear when need.purpose is empty and the use would change which products you pick, unless the shopper said it does not matter or named a kind that already implies the use. It decides the kind, the style and what matters most, so ask it right after who it is for, before showing anything. Ask about the occasion rather than listing kinds: the occasion usually settles the kind.
    - The kind is unclear only when product_types is empty and, even with the occasion known, the shopper's words could still mean very different kinds the shop has for that person (see "Kinds of ..." in WHAT THE SHOP ACTUALLY HAS). Then ask it after the occasion.
    - Usually that is all: who it is for, what it is for, and the kind if still open. Do not ask about details the shopper has not brought up unless the options really differ by them.
+   - The kind is ALWAYS unclear when need.category is empty and product_types is empty ("something to wear", "an outfit"): there is nothing to search for yet. Ask which kind, offering the two or three kinds the shop has that suit their occasion best (from "Kinds of ..." in WHAT THE SHOP ACTUALLY HAS), or offer to plan a whole outfit.
    ready_to_search is true when still_unclear is empty, or when the shopper signals they want to see products now rather than answer more questions.
 
 4. If not ready, ask ONE question about the first item in still_unclear. Think like a friend who knows this exact product:
@@ -194,9 +244,12 @@ FOR THE SHOPPER'S NEW MESSAGE
    - Under 20 words, warm and natural; you may react briefly first.
    - When asking who it is for, ask about the STYLE of the item (men's or women's, using the product's name), never about the shopper's own gender, and in a way that makes shopping for someone else feel normal. If their profile suggests a style, offer it as the likely answer while leaving the other open.
    - When asking about the kind, offer only kinds listed under "Kinds of ..." for that person, described in everyday words.
-   - Offer two or three short possible answers so it is easy to reply by voice.
+   - Offer two or three short possible answers so it is easy to reply by voice, and put the same answers in choices so they can also tap one.
    - Write a fresh question for this shopper and this product; never a generic or stock question.
    - Respect their patience. If you have already asked 3 or more questions, offer to show options now instead of asking more.
+
+   - Several kinds of product at once: put the first in need and the others in next_up, and when you ask your question, say briefly that you will start with the first and find the others next.
+   - Moving on to something in STILL TO LOOK FOR: it was asked for together with the earlier item, so it is for the same person: keep the gender.
 
 5. Category not in the catalog: set unavailable_category, keep category null, and in your question say kindly that you do not have it yet, that you have noted their request, and name the categories you can help with.
 
@@ -208,7 +261,8 @@ FOR THE SHOPPER'S NEW MESSAGE
 
 8. For reject: fill product_reference, product_position and reason. If the reason names a quality to avoid, add it to need.avoid as one or two plain words a product description would use. Set ready_to_search true so Scout can look for better options.
 
-9. For cart: keep the need unchanged, ready_to_search false, no question; set cart_action.
+9. For cart: keep the need unchanged, ready_to_search false, no question; set cart_action. To change the size of something in the cart, set cart_action size, cart_positions to that item and size.
+   Sizes: when SIZE SCOUT IS WAITING FOR names a product and they give a size, set intent choose and size (keep the need unchanged). If they ask about sizes or for help choosing one, set intent other and reply briefly using the sizes listed there; it is still waiting. When they choose a product and say its size at once, set size too.
    remove: set cart_positions to the numbers of the items in THEIR CART they mean, however they describe them (by number, name, colour, kind of product, price, or the one just discussed). If the cart has only one item, that is the one they mean. If it could be more than one item and they did not say which, leave cart_positions empty; Scout will ask.
    clear: they want everything taken out of the cart.
 
@@ -233,7 +287,7 @@ class ElicitationAgentBuilder:
         tuning = self._settings.tuning("elicitation")
         return LlmAgent(
             name="elicitation",
-            model=self._settings.model_for("elicitation"),
+            model=self._settings.llm("elicitation"),
             description="Understands each shopper message, updates the shopping need, "
                         "and asks a friendly clarifying question until the need is clear.",
             instruction=self._instruction,
@@ -259,11 +313,17 @@ class ElicitationAgentBuilder:
             last_question=state.get(state_keys.LAST_QUESTION) or "none",
             questions_asked=state.get(state_keys.QUESTIONS_ASKED, 0),
             catalog_overview=state.get(state_keys.CATALOG_OVERVIEW) or "not available",
+            next_up=", ".join(state.get(state_keys.NEXT_UP) or []) or "nothing",
             presented=_presented_products(state),
             profile=state_keys.profile(state).to_prompt_text(),
             cart=state_keys.cart(state).to_prompt_text(),
             suggestion=_suggestion_text(state),
+            size_wait=_size_wait_text(state),
+            wardrobe=_wardrobe_text(state),
+            just_added=_just_added_text(state),
             outfit=_outfit_text(state),
+            mode=("Planning an outfit (outfit mode)" if state_keys.planning_outfit(state)
+                  else "Regular shopping"),
             recent=state_keys.recent_turns_text(state),
         )
 
@@ -300,22 +360,31 @@ class ElicitationAgentBuilder:
         self._carry_outfit_request(state, turn)
         self._fresh_outfit_need(state, turn)
         turn.need.product_types = self._known_types(turn.need.product_types)
+        if turn.need.gender is None and turn.style_answer:   # the answer to "whose style?", asked on its own
+            turn.need.gender = turn.style_answer
         turn.need.gender = self._kept_gender(state, turn.need)
+        state[state_keys.NEXT_UP] = self._next_up(state, turn)
         message = content_text(callback_context.user_content, separator=" ")
         turn.need.avoid = self._grounded_avoid(state, turn, message)
+        if self._must_ask_kind(turn, asked) and not state.get(state_keys.OUTFIT_REQUESTED)                 and not state_keys.planning_outfit(state):   # an outfit is planned piece by piece, not by kind
+            logger.info("Need has no kind of product; asking which before searching.")
+            turn.ready_to_search = False
+            turn.question = turn.question or _kind_question(turn.need, self._catalog.categories())
         if self._must_ask_gender(turn, asked):
             logger.info("Need has no gender for %r; asking before searching.", turn.need.category)
             turn.ready_to_search = False
             turn.question = _gender_question(turn.need)
+            turn.choices = ["Men's style", "Women's style"]
         starting_outfit = turn.intent == "outfit" and turn.outfit_action == "start"
-        state[state_keys.OUTFIT_REQUESTED] = ({"pieces": turn.outfit_pieces}
-                                              if starting_outfit and not turn.ready_to_search else None)
+        state[state_keys.OUTFIT_REQUESTED] = True if starting_outfit and not turn.ready_to_search else None
         self._forget_heard_if_need_changed(state, turn.need)
         state[state_keys.NEED] = turn.need.model_dump()
         if turn.question and not turn.ready_to_search:
             state[state_keys.QUESTIONS_ASKED] = asked + 1
             state[state_keys.LAST_QUESTION] = turn.question
-        elif turn.ready_to_search:
+        if not turn.question or turn.ready_to_search:
+            turn.choices = []                       # answers to tap belong to a question
+        if turn.ready_to_search:
             state[state_keys.QUESTIONS_ASKED] = 0
             state[state_keys.LAST_QUESTION] = None
 
@@ -324,14 +393,23 @@ class ElicitationAgentBuilder:
 
     @staticmethod
     def _kept_gender(state, need: ShoppingNeed) -> Optional[str]:
-        """The model sometimes drops a style the shopper already gave; keep it while the category stays the same.
+        """The model sometimes drops a style the shopper already gave; keep it while the category stays the same,
+        or when they move on to something they asked for together with it (STILL TO LOOK FOR).
 
-        A new category may be for someone else, so there the model's answer stands (it asks again).
+        Any other new category may be for someone else, so there the model's answer stands (it asks again).
         """
         previous = state_keys.need(state)
-        if need.gender is None and previous.gender and previous.category == need.category:
+        asked_together = need.category in (state.get(state_keys.NEXT_UP) or [])
+        if need.gender is None and previous.gender and (previous.category == need.category or asked_together):
             return previous.gender
         return need.gender
+
+    def _next_up(self, state, turn: TurnUnderstanding) -> list[str]:
+        """What they still want to look for after the current item: kept until they move on to it."""
+        known = {c.lower(): c for c in self._catalog.categories()}
+        wanted = [*(state.get(state_keys.NEXT_UP) or []), *turn.next_up]
+        current = (turn.need.category or "").lower()
+        return list(dict.fromkeys(known[c.lower()] for c in wanted if c.lower() in known and c.lower() != current))
 
     @staticmethod
     def _forget_heard_if_need_changed(state, need: ShoppingNeed) -> None:
@@ -343,26 +421,30 @@ class ElicitationAgentBuilder:
 
     @staticmethod
     def _carry_outfit_request(state, turn: TurnUnderstanding) -> None:
-        """An outfit needs only one thing first: whose style it is (asked by _must_ask_gender). The Stylist plans
-        the pieces, so no other question is asked. The answer ("women's") reads like ordinary shopping, so a
-        request waiting on that question carries on into the reply, unless the shopper moved on."""
-        requested = state.get(state_keys.OUTFIT_REQUESTED)
-        if requested and turn.intent in ("shop", "other"):
+        """A plan needs the occasion and what they will do there (asked here), and whose style (asked by
+        _must_ask_gender); the Stylist plans the pieces, so nothing else is asked. An answer to one of those
+        questions ("women's") reads like ordinary shopping, so a request waiting on it carries on into the reply,
+        with what was already said, unless the shopper moved on."""
+        if state.get(state_keys.OUTFIT_REQUESTED) and turn.intent in ("shop", "other"):
             turn.intent, turn.outfit_action = "outfit", "start"
-            turn.outfit_pieces = turn.outfit_pieces or requested.get("pieces", [])
+        previous = read_turn(state)
+        if turn.intent == "outfit" and not turn.activities and previous and state.get(state_keys.OUTFIT_REQUESTED):
+            turn.activities = previous.activities
+        if turn.intent == "outfit" and turn.outfit_action is None and state_keys.capsule(state) is None:
+            turn.outfit_action = "start"            # asked for a plan without saying how: plan one
         if turn.intent == "outfit" and turn.outfit_action == "start":
-            turn.ready_to_search, turn.question = True, None
+            # The trip and what they will do there is all the Stylist needs. Planning again keeps what it knew.
+            if turn.need.purpose and (turn.activities or state_keys.capsule(state) is not None):
+                turn.ready_to_search, turn.question, turn.choices = True, None, []
+            else:
+                turn.ready_to_search = False
+                turn.question = turn.question or "Lovely! What's the occasion, and what will you be doing?"
 
     @staticmethod
     def _fresh_outfit_need(state, turn: TurnUnderstanding) -> None:
-        """A new outfit starts from the occasion. While an outfit was in progress the need held the piece being
-        searched (its kind and the budget left), which must not carry over."""
-        if turn.intent != "outfit" or turn.outfit_action != "start":
-            return
-        turn.need.category, turn.need.product_types = None, []
-        previous = state_keys.outfit(state)
-        if previous is not None and turn.need.budget_max == state_keys.need(state).budget_max:
-            turn.need.budget_max = None          # the old outfit's leftover, not a budget they gave now
+        """A plan starts from the occasion, never from a kind of product left over from regular shopping."""
+        if turn.intent == "outfit" and turn.outfit_action == "start":
+            turn.need.category, turn.need.product_types = None, []
 
     @staticmethod
     def _settle_suggestion(state, turn: TurnUnderstanding) -> None:
@@ -392,6 +474,12 @@ class ElicitationAgentBuilder:
         category, kind or style (men / women, the values gender takes) as whole words are dropped."""
         names = [*self._catalog.categories(), *self._catalog.product_types(), *GENDER_STYLES]
         return [term for term in need.avoid if not any(_whole_words(name) <= _whole_words(term) for name in names)]
+
+    def _must_ask_kind(self, turn: TurnUnderstanding, asked: int) -> bool:
+        """Never search with no kind of product at all ("something to wear for a wedding"): the search finds
+        nothing and Scout can only apologise. The prompt asks for this; this is the safety net."""
+        return (turn.intent in ("shop", "reject") and turn.ready_to_search and not turn.need.category
+                and not turn.need.product_types and asked < self._settings.elicitation_safety_max_questions)
 
     def _must_ask_gender(self, turn: TurnUnderstanding, asked: int) -> bool:
         """Never search a category the shop sells in both men's and women's styles without knowing which.
@@ -448,36 +536,58 @@ def read_turn(state) -> Optional[TurnUnderstanding]:
 
 
 def _suggestion_text(state) -> str:
-    suggestion = state_keys.suggestion(state)
-    if suggestion is None:
+    options = state_keys.suggestions(state)
+    if not options:
         return "none"
-    product = suggestion.product
-    offered = " Scout offered it in its last reply." if state.get(state_keys.OFFER_OPEN) else ""
-    return (f"{' '.join(product.title.split()[:10])} (a {product.kind}, "
-            f"goes with their {suggestion.goes_with}).{offered}")
+    offered = "\nScout offered the first one in its last reply." if state.get(state_keys.OFFER_OPEN) else ""
+    return "\n".join(f"{n}. {' '.join(s.product.title.split()[:10])} (a {s.product.kind}, goes with their {s.goes_with})"
+                     for n, s in enumerate(options, start=1)) + offered
+
+
+def _wardrobe_text(state) -> str:
+    return "\n".join(f"- {item.description} ({item.category})" for item in state_keys.wardrobe(state)) or "none yet"
+
+
+def _just_added_text(state) -> str:
+    added = set(state.get(state_keys.WARDROBE_JUST_ADDED) or [])
+    return "\n".join(f"- {item.description} ({item.category})"
+                     for item in state_keys.wardrobe(state) if item.id in added) or "none"
 
 
 def _outfit_text(state) -> str:
-    outfit = state_keys.outfit(state)
-    if outfit is None and state.get(state_keys.OUTFIT_REQUESTED):
-        return ("Not started yet: the shopper asked for an outfit and Scout asked whose style it is. "
+    capsule = state_keys.capsule(state)
+    if capsule is None and state.get(state_keys.OUTFIT_REQUESTED):
+        return ("Not started yet: the shopper asked for a plan and Scout asked whose style it is. "
                 "Their reply continues that request (intent outfit, start) unless they clearly want something else.")
-    if outfit is None:
-        return "none"
-    index = outfit.current()
-    if index is not None:
-        now = f"Scout is showing options for the {outfit.plan.pieces[index].category}."
-    elif outfit.offered_extra:
-        now = f"Scout offered to find a {outfit.offered_extra.category} to finish the look."
-    else:
-        now = "Scout offered to put the whole outfit in their cart."
-    return f"{outfit.to_prompt_text()}\n{now}"
+    return capsule.to_prompt_text() if capsule else "none"
 
 
 def _gender_question(need: ShoppingNeed) -> str:
     """Asked only when the model skipped this question; it names the category as the catalog spells it."""
     kind = " or ".join(need.product_types) or need.category or "outfit"
     return f"Happy to help! Is this for a men's or a women's style of {kind}?"
+
+
+def _size_wait_text(state) -> str:
+    pending = state.get(state_keys.PENDING_SIZE)
+    if not pending:
+        return "nothing"
+    if pending.get("outfit"):
+        return (f"Scout asked which size they want for the {pending.get('kinds', 'outfit')}, to add the outfit to "
+                f"the cart. It comes in {pending['scale']['spoken']}.")
+    product = Product.model_validate(pending["product"])
+    scale = size_scale(product)
+    return (f"Scout asked which size of the {product.kind or 'item'} ({' '.join(product.title.split()[:8])}) "
+            f"they want, to add it to the cart. It comes in {scale.spoken if scale else 'one size'}.")
+
+
+def _kind_question(need: ShoppingNeed, categories: list[str]) -> str:
+    """Asked only when the model wanted to search with no kind of product at all."""
+    occasion = f" for {need.purpose.removeprefix('for ')}" if need.purpose else ""
+    wearable = [c for c in ("shirt", "top", "trousers", "jeans", "shoe", "jacket") if c in categories]
+    offered = [c.lower() for c in (wearable or categories)[:3]]
+    choices = ", ".join(offered[:-1]) + f" or {offered[-1]}" if len(offered) > 1 else "".join(offered)
+    return f"Lovely! What would you like to find{occasion}: {choices}? Or I can plan a whole outfit with you."
 
 
 def _presented_products(state) -> str:

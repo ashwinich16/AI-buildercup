@@ -17,11 +17,11 @@ The reasons it is a good match are returned with it, so Scout can say why in one
 import json
 import logging
 import math
+from pathlib import Path
 from abc import ABC, abstractmethod
 from concurrent.futures import ThreadPoolExecutor
 from typing import Optional
 
-from google import genai
 from google.genai import types
 from pydantic import BaseModel, Field
 
@@ -76,10 +76,13 @@ not complete it), and never the {kind} itself. Spell each kind exactly as listed
 
 
 class GeminiPairingAdvisor(PairingAdvisor):
-    """Asks Gemini once per kind and remembers the answer for the life of the process."""
+    """Asks Gemini once per kind and remembers the answer, in a file too: what goes with what does not change,
+    so a restart (or every reload while developing) does not ask Gemini about all the shop's kinds again."""
+
+    SAVED = Path(__file__).with_name("pairings.json")
 
     def __init__(self, settings: Settings):
-        self._client = genai.Client(vertexai=True, project=settings.project_id, location=settings.vertex_location)
+        self._client = settings.genai_client()
         self._model = settings.model_for("recommender")
         tuning = settings.tuning("recommender")
         self._config = types.GenerateContentConfig(
@@ -88,7 +91,38 @@ class GeminiPairingAdvisor(PairingAdvisor):
             response_schema=_Pairing,
             thinking_config=types.ThinkingConfig(thinking_budget=tuning.thinking_budget),
         )
-        self._known: dict[str, list[str]] = {}
+        self._known: dict[str, list[str]] = self._load()
+
+    def _load(self) -> dict[str, list[str]]:
+        try:
+            return json.loads(self.SAVED.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return {}
+
+    def _save(self) -> None:
+        try:
+            self.SAVED.write_text(json.dumps(self._known, indent=1, sort_keys=True), encoding="utf-8")
+        except OSError as error:      # read-only deploys still work; they just ask again next time
+            logger.info("Could not save pairings: %s", error)
+
+    def prepare(self, shop_kinds: list[str]) -> None:
+        """Ask about every kind the shop has, all at once, so adding to the cart never waits for Gemini
+        (one call took about 9 seconds when made at add-to-cart time)."""
+        missing = [k for k in shop_kinds if k not in self._known]
+        if not missing:
+            logger.info("Pairings for %d kinds loaded from %s.", len(self._known), self.SAVED.name)
+            return
+
+        def ask(kind: str) -> None:
+            try:
+                self.kinds_that_go_with(kind, shop_kinds)
+            except Exception as error:   # one kind failing must not stop the others
+                logger.warning("Could not prepare pairings for %s: %s", kind, error)
+
+        with ThreadPoolExecutor(max_workers=3) as pool:     # gently: the shopper's own calls share the quota
+            list(pool.map(ask, missing))
+        self._save()
+        logger.info("Prepared pairings for %d kinds.", len(self._known))
 
     def kinds_that_go_with(self, kind: str, shop_kinds: list[str]) -> list[str]:
         if kind not in self._known:
@@ -112,10 +146,23 @@ class Recommender:
         self._limit = candidates_per_kind
         self._products: dict[str, Product] = {}      # cart products by id, kept for the process
 
+    def prepare(self) -> None:
+        """Work out what goes with every kind in the shop ahead of time (called at server start-up)."""
+        prepare = getattr(self._advisor, "prepare", None)
+        if prepare:
+            prepare(self._catalog.product_types())
+
     def for_new_item(self, added: Product, cart: Cart, rules: SuggestionRules) -> Optional[Suggestion]:
         """The best item to go with a product just added to the cart."""
+        options = self.options_for_new_item(added, cart, rules, limit=1)
+        return options[0] if options else None
+
+    def options_for_new_item(self, added: Product, cart: Cart, rules: SuggestionRules,
+                             limit: int = 4) -> list[Suggestion]:
+        """A few items that go with a product just added, best first and of different kinds where possible
+        (a belt, a t-shirt, sneakers), so the shopper can pick rather than take or leave one."""
         self._products[added.id] = added
-        return self._best([added], cart, rules)
+        return self._ranked([added], cart, rules, limit)
 
     def for_cart(self, cart: Cart, rules: SuggestionRules) -> Optional[Suggestion]:
         """At checkout: anything that would complete the cart as a whole ("you might have forgotten...")."""
@@ -123,29 +170,46 @@ class Recommender:
         return self._best(anchors, cart, rules)
 
     def _best(self, anchors: list[Product], cart: Cart, rules: SuggestionRules) -> Optional[Suggestion]:
+        ranked = self._ranked(anchors, cart, rules, limit=1)
+        return ranked[0] if ranked else None
+
+    def _ranked(self, anchors: list[Product], cart: Cart, rules: SuggestionRules, limit: int) -> list[Suggestion]:
         skip_ids = {item.product_id for item in cart.items} | rules.suggested_ids
         skip_kinds = {item.kind for item in cart.items if item.kind} | rules.suggested_kinds
         need = rules.need
-        budget_left = max(need.budget_max - cart.total, 0) if need.budget_max is not None else None
 
         # (cart item, rank, kind) for every kind that would complete it, searched all at once.
         plans = [(anchor, rank, kind) for anchor in anchors
                  for rank, kind in enumerate(k for k in self._kinds_for(anchor) if k not in skip_kinds)]
         if not plans:
-            return None
+            return []
+        # The budget they gave was for the item they were looking for ("shoes around $60"), not for what goes
+        # with it; an extra simply never costs more than the item it goes with.
         with ThreadPoolExecutor(max_workers=min(len(plans), 8)) as pool:
-            found = list(pool.map(lambda plan: self._candidates(plan[0], plan[2], budget_left, need), plans))
+            found = list(pool.map(lambda plan: self._candidates(plan[0], plan[2], plan[0].price, need), plans))
 
-        best: Optional[tuple[float, Suggestion]] = None
+        scored: list[tuple[float, Suggestion]] = []
         for (anchor, rank, _kind), candidates in zip(plans, found):
             for candidate in candidates:
                 if candidate.id in skip_ids or any(has_all(candidate, [term]) for term in rules.avoid if term):
                     continue
                 score, reasons = _score(anchor, candidate)
                 score -= 0.6 * rank                # the most essential kinds first
-                if best is None or score > best[0]:
-                    best = (score, Suggestion(product=candidate, goes_with=anchor.kind or "item", reasons=reasons))
-        return best[1] if best else None
+                scored.append((score, Suggestion(product=candidate, goes_with=anchor.kind or "item", reasons=reasons)))
+        scored.sort(key=lambda item: item[0], reverse=True)
+
+        # Best of each kind first (variety: a belt, a t-shirt, sneakers), then the next best of any kind.
+        chosen: list[Suggestion] = []
+        kinds_taken: set[str] = set()
+        for _score_value, suggestion in scored:
+            if len(chosen) < limit and suggestion.product.kind not in kinds_taken \
+                    and all(s.product.id != suggestion.product.id for s in chosen):
+                chosen.append(suggestion)
+                kinds_taken.add(suggestion.product.kind)
+        for _score_value, suggestion in scored:
+            if len(chosen) < limit and all(s.product.id != suggestion.product.id for s in chosen):
+                chosen.append(suggestion)
+        return chosen
 
     def _kinds_for(self, anchor: Product) -> list[str]:
         kind = anchor.kind
@@ -157,11 +221,11 @@ class Recommender:
             logger.warning("Could not decide what goes with %s: %s", kind, error)
             return []
 
-    def _candidates(self, anchor: Product, kind: str, budget_left: Optional[float],
+    def _candidates(self, anchor: Product, kind: str, max_price: Optional[float],
                     need: ShoppingNeed) -> list[Product]:
         gender = anchor.gender if anchor.gender in ("men", "women") else need.gender_filter()
         query = SearchQuery(text=" ".join([*anchor.style_tags[:3], kind]), product_types=[kind],
-                            gender=gender, max_price=budget_left, limit=self._limit)
+                            gender=gender, max_price=max_price, limit=self._limit)
         try:
             return self._catalog.search(query)
         except Exception as error:
