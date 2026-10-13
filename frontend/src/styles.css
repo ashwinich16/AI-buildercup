@@ -2114,6 +2114,20 @@ button {
   padding-top: 8px;
   border-top: 1px solid var(--line);
 }
+.capsule__size {
+  width: fit-content;
+  margin: 4px 0 0;
+  padding: 1px 8px;
+  border-radius: 999px;
+  border: 1px solid var(--line);
+  font-size: 0.78rem;
+  font-weight: 600;
+}
+.capsule__size.is-open {
+  border-style: dashed;
+  font-weight: 500;
+  color: var(--muted, inherit);
+}
 .capsule__price {
   margin: 2px 0 0;
   font-size: 0.86rem;

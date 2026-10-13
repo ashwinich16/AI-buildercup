@@ -75,6 +75,8 @@ export default function CapsuleBoard({ capsule, busy, onAsk, onTryOn, onOpenWard
                     </p>
                     <p className="capsule__name muted">{tile.description}</p>
                     {tile.price != null && <p className="capsule__price">{formatPrice(tile.price)}</p>}
+                    {tile.size && <p className="capsule__size">Size {tile.size}</p>}
+                    {tile.needs_size && <p className="capsule__size is-open">Size: asked before the cart</p>}
                     <div className="capsule__tile-actions">
                       <button
                         className="link-button"

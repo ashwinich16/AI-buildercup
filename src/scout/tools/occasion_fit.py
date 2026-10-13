@@ -18,7 +18,7 @@ from scout.domain import Product
 
 logger = logging.getLogger(__name__)
 
-JUDGE_TIMEOUT_S = 12    # usually 2-5 s; past this the search order is used for that piece instead
+JUDGE_TIMEOUT_S = 30    # usually 2-9 s (the first of a batch is slowest); past this the search order is used
 
 class OccasionFit(BaseModel):
     product_id: str

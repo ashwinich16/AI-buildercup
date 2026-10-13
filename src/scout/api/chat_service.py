@@ -30,6 +30,7 @@ from scout.agents import state_keys
 from scout.agents.elicitation import read_turn
 from scout.agents.model_io import content_text
 from scout.api.shopper_repository import ConversationStore, ShopperMemory, ShopperRepository
+from scout.domain.sizes import size_scale
 from scout.domain import Outfit, Preference, PreferenceProfile, Product, Traits, WardrobeItem
 from scout.tools import Cart, CartItem, EvidencePicker, WishlistItem
 from scout.tools.taste_reader import TasteReader
@@ -86,6 +87,8 @@ class BoardTile(BaseModel):
     description: str
     image_url: Optional[str] = None
     price: Optional[float] = None                          # a new piece's price
+    size: Optional[str] = None                             # the size it will be added in ("L", "32 waist")
+    needs_size: bool = False                               # it comes in sizes and none is chosen yet
     owned: bool = False
     missing: bool = False                                  # a new piece nothing suitable was found for
     changing: bool = False                                 # the options on screen are for this piece
@@ -561,7 +564,8 @@ def _screen_from_state(state: dict) -> ScreenState:
                        cart=CartView(items=cart.items, total=cart.total),
                        wishlist=WishlistView(items=state_keys.wishlist(state).items),
                        suggestion=_suggestion_card(state),
-                       capsule=_capsule_view(state_keys.outfit(state), state_keys.wardrobe(state)),
+                       capsule=_capsule_view(state_keys.outfit(state), state_keys.wardrobe(state),
+                                             state.get(state_keys.KNOWN_SIZES) or {}),
                        planning_outfit=state_keys.planning_outfit(state),
                        wardrobe=state_keys.wardrobe(state), spotlight=spotlight,
                        suggestions=[_small_card(s.product).model_copy(update={"goes_with": s.goes_with,
@@ -577,7 +581,15 @@ def _suggestion_card(state: dict) -> Optional[SmallProductCard]:
                                                              "reasons": suggestion.reasons})
 
 
-def _capsule_view(outfit: Optional[Outfit], wardrobe: list[WardrobeItem]) -> Optional[CapsuleView]:
+def _size_label(product: Product, known_sizes: dict) -> Optional[str]:
+    """The size a piece will be added in, from the sizes they gave this conversation ("L", "32 waist")."""
+    scale = size_scale(product)
+    size = known_sizes.get(scale.key) if scale is not None else None
+    return scale.label(size) if scale is not None and size in scale.options else None
+
+
+def _capsule_view(outfit: Optional[Outfit], wardrobe: list[WardrobeItem],
+                  known_sizes: Optional[dict] = None) -> Optional[CapsuleView]:
     """The board. Pictures of their own pieces come from their wardrobe (the outfit keeps only the words)."""
     if outfit is None:
         return None
@@ -595,8 +607,10 @@ def _capsule_view(outfit: Optional[Outfit], wardrobe: list[WardrobeItem]) -> Opt
                                        image_url=pictures.get(piece.owned), owned=True, changing=changing))
             elif piece.product is not None:
                 card = _small_card(piece.product)
+                size = _size_label(piece.product, known_sizes or {})
                 tiles.append(BoardTile(category=piece.category, description=card.name, image_url=card.image_url,
-                                       price=card.price, changing=changing))
+                                       price=card.price, changing=changing, size=size,
+                                       needs_size=size is None and size_scale(piece.product) is not None))
             else:
                 tiles.append(BoardTile(category=piece.category, description=f"No {piece.category} found yet",
                                        missing=True, changing=changing))
