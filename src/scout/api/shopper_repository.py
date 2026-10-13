@@ -2,7 +2,7 @@
 What Scout keeps in the database, behind two small interfaces:
 
   ShopperRepository   what Scout remembers about a shopper between conversations: the name they asked to
-                      be called, their preferences, their cart and their wardrobe
+                      be called, their preferences and taste, their cart, their wishlist and their wardrobe
   ConversationStore   the current conversation, as one compact summary row (Scout's session state: what is
                       being looked for, the options shown, the outfit plan, the last few exchanges), never
                       the full message history. It lets a conversation carry on after a server restart or
@@ -26,10 +26,13 @@ from typing import Callable, Optional
 from pydantic import BaseModel, Field
 
 from scout.config import Settings
-from scout.domain import Preference, PreferenceProfile, WardrobeItem
-from scout.tools import Cart, CartItem
+from scout.domain import Preference, PreferenceProfile, TasteProfile, WardrobeItem
+from scout.domain.taste import TasteMark
+from scout.tools import Cart, CartItem, Wishlist, WishlistItem
 
 logger = logging.getLogger(__name__)
+
+CONNECT_TIMEOUT_S = 10      # opening a database connection; normally well under a second in the same region
 
 
 class ShopperMemory(BaseModel):
@@ -38,6 +41,8 @@ class ShopperMemory(BaseModel):
     preferred_name: str = ""               # what they asked Scout to call them
     preferences: PreferenceProfile = Field(default_factory=PreferenceProfile)
     cart: Cart = Field(default_factory=Cart)
+    wishlist: Wishlist = Field(default_factory=Wishlist)   # products saved for later
+    taste: TasteProfile = Field(default_factory=TasteProfile)   # learned from what they own and shop
     wardrobe: list[WardrobeItem] = Field(default_factory=list)   # clothes they already own
 
 
@@ -129,6 +134,27 @@ class CloudSqlShopperRepository(ShopperRepository, ConversationStore):
         "ALTER TABLE cart_item ADD COLUMN IF NOT EXISTS kind TEXT",   # added later; older tables lack it
         "ALTER TABLE cart_item ADD COLUMN IF NOT EXISTS image_url TEXT",
         "ALTER TABLE cart_item ADD COLUMN IF NOT EXISTS size TEXT",
+        """CREATE TABLE IF NOT EXISTS wishlist_item (
+            user_id     TEXT NOT NULL,
+            product_id  TEXT NOT NULL,
+            name        TEXT NOT NULL,
+            price       DOUBLE PRECISION,
+            kind        TEXT,
+            image_url   TEXT,
+            position    INTEGER NOT NULL,
+            added_at    TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            PRIMARY KEY (user_id, product_id)
+        )""",
+        """CREATE TABLE IF NOT EXISTS taste_mark (
+            user_id     TEXT NOT NULL,
+            trait       TEXT NOT NULL,
+            value       TEXT NOT NULL,
+            style       TEXT NOT NULL,
+            weight      DOUBLE PRECISION NOT NULL,
+            items       INTEGER NOT NULL,
+            updated_at  TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            PRIMARY KEY (user_id, trait, value, style)
+        )""",
         """CREATE TABLE IF NOT EXISTS wardrobe_item (
             user_id     TEXT NOT NULL,
             item_id     TEXT NOT NULL,
@@ -188,6 +214,16 @@ class CloudSqlShopperRepository(ShopperRepository, ConversationStore):
                           image_url=image, size=size)
                  for pid, name, price, kind, image, size in cursor.fetchall()]
 
+        cursor.execute("SELECT product_id, name, price, kind, image_url FROM wishlist_item WHERE user_id = %s "
+                       "ORDER BY position", (user_id,))
+        saved = [WishlistItem(product_id=pid, name=name, price=None if price is None else float(price), kind=kind,
+                              image_url=image)
+                 for pid, name, price, kind, image in cursor.fetchall()]
+
+        cursor.execute("SELECT trait, value, style, weight, items FROM taste_mark WHERE user_id = %s "
+                       "ORDER BY weight DESC", (user_id,))
+        marks = [TasteMark(trait=t, value=v, style=s, weight=float(w), items=n) for t, v, s, w, n in cursor.fetchall()]
+
         cursor.execute("SELECT item_id, category, description, thumbnail FROM wardrobe_item "
                        "WHERE user_id = %s ORDER BY added_at", (user_id,))
         wardrobe = [WardrobeItem(id=i, category=c, description=d, thumbnail=t) for i, c, d, t in cursor.fetchall()]
@@ -197,6 +233,8 @@ class CloudSqlShopperRepository(ShopperRepository, ConversationStore):
             preferred_name=shopper[0],
             preferences=PreferenceProfile(preferences=preferences),
             cart=Cart(items=items),
+            wishlist=Wishlist(items=saved),
+            taste=TasteProfile(marks=marks),
             wardrobe=wardrobe,
         )
 
@@ -213,6 +251,8 @@ class CloudSqlShopperRepository(ShopperRepository, ConversationStore):
             (user_id, memory.preferred_name))
         self._save_preferences(cursor, user_id, memory.preferences.preferences)
         self._save_cart(cursor, user_id, memory.cart.items)
+        self._save_wishlist(cursor, user_id, memory.wishlist.items)
+        self._save_taste(cursor, user_id, memory.taste.marks)
         self._save_wardrobe(cursor, user_id, memory.wardrobe)
 
     @staticmethod
@@ -264,6 +304,37 @@ class CloudSqlShopperRepository(ShopperRepository, ConversationStore):
                 "image_url = COALESCE(EXCLUDED.image_url, cart_item.image_url), size = EXCLUDED.size, "
                 "position = EXCLUDED.position",
                 (user_id, item.product_id, item.name, item.price, item.kind, item.image_url, item.size, position))
+
+    @staticmethod
+    def _save_wishlist(cursor, user_id: str, items: list[WishlistItem]) -> None:
+        wanted = {item.product_id for item in items}
+        cursor.execute("SELECT product_id FROM wishlist_item WHERE user_id = %s", (user_id,))
+        for (product_id,) in cursor.fetchall():
+            if product_id not in wanted:                    # taken off the wishlist
+                cursor.execute("DELETE FROM wishlist_item WHERE user_id = %s AND product_id = %s",
+                               (user_id, product_id))
+        for position, item in enumerate(items, start=1):
+            cursor.execute(
+                "INSERT INTO wishlist_item (user_id, product_id, name, price, kind, image_url, position) "
+                "VALUES (%s, %s, %s, %s, %s, %s, %s) "
+                "ON CONFLICT (user_id, product_id) DO UPDATE SET "
+                "name = EXCLUDED.name, price = EXCLUDED.price, kind = EXCLUDED.kind, "
+                "image_url = COALESCE(EXCLUDED.image_url, wishlist_item.image_url), position = EXCLUDED.position",
+                (user_id, item.product_id, item.name, item.price, item.kind, item.image_url, position))
+
+    @staticmethod
+    def _save_taste(cursor, user_id: str, marks: list[TasteMark]) -> None:
+        wanted = {mark.key(): mark for mark in marks}
+        cursor.execute("SELECT trait, value, style FROM taste_mark WHERE user_id = %s", (user_id,))
+        for key in {tuple(row) for row in cursor.fetchall()} - set(wanted):     # forgotten, or dropped as lightest
+            cursor.execute("DELETE FROM taste_mark WHERE user_id = %s AND trait = %s AND value = %s AND style = %s",
+                           (user_id, *key))
+        for mark in marks:
+            cursor.execute(
+                "INSERT INTO taste_mark (user_id, trait, value, style, weight, items) VALUES (%s, %s, %s, %s, %s, %s) "
+                "ON CONFLICT (user_id, trait, value, style) DO UPDATE SET weight = EXCLUDED.weight, "
+                "items = EXCLUDED.items, updated_at = CURRENT_TIMESTAMP",
+                (user_id, mark.trait, mark.value, mark.style, mark.weight, mark.items))
 
     # ----- the current conversation -----
 
@@ -337,14 +408,19 @@ def build_shopper_repository(settings: Settings) -> CloudSqlShopperRepository | 
 
     secret = (f"projects/{settings.project_id}/secrets/{settings.db_password_secret}/versions/latest")
     connector = None
+    password = None
 
     def connect():
-        """Called on first use and on reconnects only, never at server start."""
-        nonlocal connector
-        connector = connector or Connector()
-        password = secretmanager.SecretManagerServiceClient().access_secret_version(
+        """Called on first use and on reconnects only, never at server start.
+
+        "lazy": certificates are fetched when a connection is opened, not refreshed in the background (Cloud Run
+        may pause a server's CPU between requests, which stalls background refreshes). The timeout means a
+        database that cannot be reached fails in seconds instead of holding every request up."""
+        nonlocal connector, password
+        connector = connector or Connector(refresh_strategy="lazy")
+        password = password or secretmanager.SecretManagerServiceClient().access_secret_version(
             name=secret).payload.data.decode("utf-8").strip()
         return connector.connect(settings.db_instance, "pg8000", user=settings.db_user,
-                                 password=password, db=settings.db_name)
+                                 password=password, db=settings.db_name, timeout=CONNECT_TIMEOUT_S)
 
     return CloudSqlShopperRepository(connect)

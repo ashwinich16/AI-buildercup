@@ -26,6 +26,11 @@ def build_catalog(settings: Settings) -> CatalogRepository:
     return VertexSearchCatalog(settings)
 
 
+def build_learner(settings: Settings | None = None) -> BaseAgent:
+    """The Preference agent, run after each turn has ended (by ScoutChatService), never during it."""
+    return PreferenceAgentBuilder(settings or get_settings()).build()
+
+
 def build_root_agent(settings: Settings | None = None, catalog: CatalogRepository | None = None) -> BaseAgent:
     settings = settings or get_settings()
     catalog = catalog or build_catalog(settings)
@@ -35,7 +40,6 @@ def build_root_agent(settings: Settings | None = None, catalog: CatalogRepositor
         narration=NarrationAgentBuilder(settings).build(),
         product_expert=ProductExpertAgentBuilder(settings, images).build(),
         comparison=ComparisonAgentBuilder(settings, images).build(),
-        preference=PreferenceAgentBuilder(settings).build(),
         stylist=StylistAgentBuilder(settings, catalog).build(),
         retriever=ProductRetriever(catalog, limit=settings.search_result_limit),
         overview_builder=CatalogOverviewBuilder(catalog),

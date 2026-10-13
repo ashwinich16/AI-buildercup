@@ -7,8 +7,11 @@ connection, so without this the first search of a conversation paid that price
 twice (Elicitation, then Narration). Vertex AI Search and Text-to-Speech have a
 smaller cold start of their own.
 
-At server start, and every few minutes after (idle connections go cold again),
-this sends one tiny request through each of them. It never affects a
+At server start, this sends one tiny request through each of them. Every few minutes after, only the
+connections that cost nothing to keep warm are refreshed (search, speech, the database): Gemini calls
+count against the project's Gemini allowance, and repeating them for every agent all day long used up
+the allowance the shoppers' own turns need ("429 Resource exhausted"). The expensive part of a Gemini
+connection (credentials) is set up once and kept, so a repeat gains little. It never affects a
 conversation: failures are logged and ignored.
 """
 
@@ -45,10 +48,10 @@ async def _warm_model(agent: LlmAgent) -> None:
         pass
 
 
-async def warm_up(root: BaseAgent, others: list[Callable[[], object]]) -> None:
-    """One tiny request through every Gemini agent, plus each blocking client in `others`."""
+async def warm_up(root: BaseAgent, others: list[Callable[[], object]], models: bool = True) -> None:
+    """One tiny request through each blocking client in `others`, and through every Gemini agent if `models`."""
     started = time.monotonic()
-    jobs = [_warm_model(agent) for agent in _llm_agents(root)]
+    jobs = [_warm_model(agent) for agent in _llm_agents(root)] if models else []
     jobs += [asyncio.to_thread(call) for call in others]
     results = await asyncio.gather(*jobs, return_exceptions=True)
     failures = [r for r in results if isinstance(r, Exception)]
@@ -58,6 +61,8 @@ async def warm_up(root: BaseAgent, others: list[Callable[[], object]]) -> None:
 
 
 async def keep_warm(root: BaseAgent, others: list[Callable[[], object]]) -> None:
+    """Everything once at start (Gemini included); after that only `others`, which use no Gemini allowance."""
+    await warm_up(root, others)
     while True:
-        await warm_up(root, others)
         await asyncio.sleep(KEEP_WARM_SECONDS)
+        await warm_up(root, others, models=False)

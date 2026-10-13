@@ -40,6 +40,9 @@ INSTRUCTION = """You keep the long-term profile of a shopper using Scout, a shop
 CURRENT PROFILE
 {profile}
 
+THEIR TASTE, LEARNED FROM WHAT THEY OWN AND SHOP (kept by code; you never add to it)
+{taste}
+
 WHAT HAPPENED THIS TURN
 {evidence}
 
@@ -63,7 +66,7 @@ How to write each one:
 - value: plain words; for taste, the words a product description would use.
 - scope: the catalog category if it only applies to that kind of product; null if it applies to everything.
 - polarity: like or avoid.
-- If they ask Scout to forget or stop assuming something, put it in forget.
+- If they ask Scout to forget or stop assuming something, put it in forget (also for something in THEIR TASTE: its value in value, the kind of taste in attribute).
 - If nothing lasting was revealed, return empty lists. That is the most common, correct answer.
 """
 
@@ -93,6 +96,7 @@ class PreferenceAgentBuilder:
         return INSTRUCTION.format(
             profile=json.dumps([p.model_dump() for p in profile.preferences], ensure_ascii=False) or "[]",
             evidence=state.get(state_keys.PREFERENCE_EVIDENCE) or "The shopper said something about themselves.",
+            taste=state_keys.taste(state).to_prompt_text(None),
         )
 
     # Merge in code, so the confidence rules are applied exactly, not left to the model.
@@ -102,5 +106,8 @@ class PreferenceAgentBuilder:
             state = callback_context.state
             profile = state_keys.profile(state)
             state[state_keys.PREFERENCES] = profile.merge(update.updates, update.forget).model_dump()
+            taste = state_keys.taste(state)
+            if taste.forget([key.value for key in update.forget]):     # "forget that I like navy": learned too
+                state[state_keys.TASTE] = taste.model_dump()
             logger.info("Preferences updated: +%d, forgotten %d", len(update.updates), len(update.forget))
         return None

@@ -4,6 +4,7 @@ from scout.tools.image_fetcher import ImageFetcher
 from scout.tools.product_reference import ProductReferenceResolver
 from scout.tools.retrieval import ProductRetriever, RetrievalResult
 from scout.tools.review_evidence import Evidence, EvidencePicker
+from scout.tools.wishlist import Wishlist, WishlistItem
 
 __all__ = [
     "Cart", "CartItem",
@@ -12,4 +13,5 @@ __all__ = [
     "ProductReferenceResolver",
     "ProductRetriever", "RetrievalResult",
     "Evidence", "EvidencePicker",
+    "Wishlist", "WishlistItem",
 ]

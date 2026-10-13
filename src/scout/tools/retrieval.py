@@ -57,6 +57,15 @@ class ProductRetriever:
         return SearchQuery(category=need.category, product_types=need.product_types, gender=need.gender_filter(),
                            min_price=need.budget_min, max_price=need.budget_max).matches(product)
 
+    def products(self, product_ids: list[str]) -> list[Product]:
+        """These products from the catalog, in this order (all looked up at the same time); ones the catalog no
+        longer has are left out."""
+        if not product_ids:
+            return []
+        with ThreadPoolExecutor(max_workers=min(len(product_ids), 8)) as pool:
+            found = list(pool.map(self._catalog.get_product, product_ids))
+        return [product for product in found if product is not None]
+
     def find(self, need: ShoppingNeed, exclude_ids: Optional[set[str]] = None) -> RetrievalResult:
         """Exact matches first, topped up with related products. `exclude_ids` skips products already shown."""
         excluded = set(exclude_ids or ())

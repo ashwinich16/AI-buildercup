@@ -35,6 +35,9 @@ class ShoppingNeed(BaseModel):
     budget_max: Optional[float] = Field(default=None, description="Upper price limit in dollars, if given")
     must_have: list[str] = Field(default_factory=list, max_length=MAX_LIST_ITEMS, description="Features they need, in plain words a product description would use")
     avoid: list[str] = Field(default_factory=list, max_length=MAX_LIST_ITEMS, description="Qualities they do not want, in plain words a product description would use")
+    for_someone_else: bool = Field(default=False, description="True when they said it is for someone else (a gift, "
+                                                              "a partner, a child): Scout then learns nothing "
+                                                              "about their own taste from it")
 
     def gender_filter(self) -> Optional[str]:
         """'men' or 'women' when the search should be limited to that style (plus unisex)."""

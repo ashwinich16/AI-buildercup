@@ -5,28 +5,36 @@ A voice-first shopping companion for blind and low-vision shoppers, built on Goo
 
 Scout talks with the shopper like a friend: it asks a few questions to understand the need, searches the
 catalog, describes options vividly, answers questions about a product (including what its photos show),
-compares products, keeps a cart, suggests one item that goes with what the shopper chose, plans outfits
-for a trip or a week from the clothes the shopper already owns (only the missing pieces are bought), shows products on the shopper's own photo (Vertex AI Virtual
-Try-On), and remembers lasting preferences. The conversation is hands-free:
-the browser listens, Google Cloud Text-to-Speech speaks, and short chimes signal whose turn it is.
+compares products, keeps a cart and a wishlist (saved options can be shown and compared again later), and
+suggests one item that goes with what the shopper chose. It plans outfits for any occasion: exactly the
+number of looks asked for, each with its own pieces, the shopper's own clothes first (added from photos or
+by voice), and any piece can be changed, added or removed in one look. It shows products on the shopper's
+own photo (virtual try-on), remembers what they say about themselves, and learns their taste (colours,
+materials, patterns, styles) from what they buy, save and own. Learning happens after each reply, so it
+never slows the conversation. The conversation is hands-free: the browser listens, Google Cloud
+Text-to-Speech speaks, and short chimes signal whose turn it is.
 
 ## Repository layout
 
 ```
-conversationalAgent/
+AI-buildercup/
 ├── src/scout/
 │   ├── config.py, app.py        settings and the composition root (wires every agent)
-│   ├── domain/                  Product, ShoppingNeed, PreferenceProfile, Capsule, WardrobeItem
+│   ├── domain/                  Product, ShoppingNeed, PreferenceProfile, TasteProfile, Outfit, WardrobeItem, sizes
 │   ├── catalog/                 CatalogRepository + Vertex AI Search implementation
-│   ├── tools/                   retrieval, catalog overview, cart, images, review evidence, recommendations, try-on
-│   ├── agents/                  orchestrator, elicitation, narration, product_expert, comparison, preference, stylist
+│   ├── tools/                   retrieval, catalog overview, cart, wishlist, wardrobe photos, taste reader,
+│   │                            occasion ranking, images, review evidence, recommendations, try-on
+│   ├── agents/                  orchestrator (agent.py routes; outfit.py: OutfitPlanner), elicitation, narration,
+│   │                            product_expert, comparison, preference, stylist
 │   │                            (+ state_keys.py: shared session state; model_io.py: model input/output)
-│   └── api/                     FastAPI web API: auth, chat sessions, speech, demo personas
+│   └── api/                     FastAPI web API: auth, chat sessions (and learning after each turn), speech,
+│                                shopper memory, demo personas
 ├── frontend/                    React app (Vite): accessible voice-first UI
 │   └── src/
 │       ├── hooks/useVoice.js    listening (browser speech recognition) and speaking (Cloud TTS)
 │       ├── audio/earcons.js     the "your turn" / "thinking" / "paused" chimes
-│       ├── components/          sign-in, header, Scout stage, products, "goes well with", cart and settings sheets
+│       ├── components/          sign-in, header, Scout stage, products, "goes well with", outfit board,
+│       │                        cart, wishlist, wardrobe, try-on and settings sheets
 │       └── format.js            how prices are shown
 ├── pipeline/                    offline data jobs (ingestion, gender, product_type, enrich, review_evidence,
 │                                export) + common.py: settings, Cloud SQL, Gemini, photos shared by all of them
@@ -148,7 +156,8 @@ $env:PYTHONPATH="src"; adk web playground --port 8080            # Windows Power
 ```
 
 Open http://localhost:8080 and choose `scout_app` (the full Scout conversation) or `elicitation`
-(only the need-understanding agent).
+(only the need-understanding agent). The playground does not learn preferences or taste: that runs in the
+API server after each turn (`ScoutChatService`).
 
 ## Smoke tests
 
@@ -202,12 +211,14 @@ run `DELETE FROM product_intelligence;` first.
 |---|---|
 | `GOOGLE_CLOUD_PROJECT`, `GOOGLE_CLOUD_LOCATION`, `GOOGLE_GENAI_USE_VERTEXAI` | Gemini on Vertex AI |
 | `SCOUT_AGENT_MODEL` | default model for every agent |
-| `SCOUT_TRY_ON_MODEL` | Vertex AI Virtual Try-On model (default `virtual-try-on-001`), called in `GOOGLE_CLOUD_LOCATION` |
-| `SCOUT_<AGENT>_MODEL / _TEMPERATURE / _THINKING_BUDGET` | per-agent tuning (elicitation, narration, product_expert, comparison, preference, recommender, stylist, wardrobe) |
+| `SCOUT_TRY_ON_ENGINE` | `gemini` (default: Gemini's image model, the whole outfit in one go, keeps the person, follows "tuck the shirt in") or `vto` (Vertex AI Virtual Try-On, very faithful to each garment, no instructions) |
+| `SCOUT_TRY_ON_IMAGE_MODEL` | Gemini image model for `gemini` (default `gemini-2.5-flash-image`) |
+| `SCOUT_TRY_ON_MODEL` / `SCOUT_TRY_ON_LOCATION` | Virtual Try-On model and region for `vto` (defaults `virtual-try-on-001`, `us-central1`) |
+| `SCOUT_<AGENT>_MODEL / _TEMPERATURE / _THINKING_BUDGET` | per-agent tuning (elicitation, narration, product_expert, comparison, preference, recommender, stylist, wardrobe, occasion, taste) |
 | `SCOUT_SEARCH_LOCATION`, `SCOUT_SEARCH_ENGINE_ID` or `SCOUT_SEARCH_DATA_STORE_ID` | Vertex AI Search (the data store id is also needed to look up saved cart items for the checkout suggestion) |
 | `SCOUT_AUTH_MODE` | `demo` (persona picker) or `firebase` (real sign-in) |
 | `SCOUT_TTS_VOICE` | Cloud Text-to-Speech voice |
-| `SCOUT_DB_INSTANCE`, `SCOUT_DB_NAME`, `SCOUT_DB_USER`, `SCOUT_DB_PASSWORD_SECRET` | Cloud SQL: the pipeline, and Scout's memory of each shopper (tables `shopper`, `user_preference`, `cart_item`, created automatically). Empty instance = memory only, lost on restart |
+| `SCOUT_DB_INSTANCE`, `SCOUT_DB_NAME`, `SCOUT_DB_USER`, `SCOUT_DB_PASSWORD_SECRET` | Cloud SQL: the pipeline, and Scout's memory of each shopper (tables `shopper`, `user_preference`, `taste_mark`, `cart_item`, `wishlist_item`, `wardrobe_item` and `conversation`, created automatically). Empty instance = memory only, lost on restart |
 | `SCOUT_EXPORT_*` | Cloud Storage, used by the pipeline |
 
 ## Production build (single server)
@@ -249,8 +260,8 @@ foreach ($role in "roles/aiplatform.user", "roles/discoveryengine.viewer", "role
 ```powershell
 $SA = "scout-run@scout-hackathon.iam.gserviceaccount.com"
 $envs = (Get-Content .env | Where-Object { $_ -match '^[A-Z_]+=.+' }) -join ','
-gcloud run deploy scout --source . --region us-central1 --service-account $SA `
-  --set-env-vars $envs --allow-unauthenticated `
+gcloud run deploy scout --source . --region asia-south2 --service-account $SA `
+  --set-env-vars $envs --allow-unauthenticated --no-cpu-throttling `
   --session-affinity --min-instances 1 --max-instances 1 --memory 2Gi --cpu 2 --timeout 600
 ```
 
@@ -262,8 +273,15 @@ Why these flags:
 - `--min-instances 1 --max-instances 1 --session-affinity`: one server that is always warm (no cold start in
   a demo), so a conversation always lives on the same server. Conversations are also saved in Cloud SQL
   (table `conversation`), so they survive a redeploy.
-- `--region us-central1`: next to the Gemini models (`GOOGLE_CLOUD_LOCATION`), which Scout calls several times
-  per turn. Cloud SQL is called less often (and saves in the background).
+- `--region asia-south2`: the same region as Cloud SQL, so each database query takes about a millisecond
+  instead of a quarter of a second. Gemini (`GOOGLE_CLOUD_LOCATION=global`), Vertex AI Search and
+  Text-to-Speech are global; only Virtual Try-On (`SCOUT_TRY_ON_ENGINE=vto`) calls `SCOUT_TRY_ON_LOCATION`.
+- `--no-cpu-throttling`: the server keeps its CPU between requests, so keeping connections warm and saving
+  conversations in the background never slows the next reply.
+
+Each turn logs where its time went, e.g. `Turn timing: overview 0.4s, understood 1.8s, first words 2.6s,
+reply (shop) 4.9s`. Learning runs after the turn and logs its own line, e.g. `Learned from 1 turns in 6.2s`.
+Read them with `gcloud run services logs read scout --region asia-south2 --limit 50`.
 
 With Google sign-in (`SCOUT_AUTH_MODE=firebase`), add the `run.app` address in Firebase console →
 Authentication → Settings → Authorized domains.

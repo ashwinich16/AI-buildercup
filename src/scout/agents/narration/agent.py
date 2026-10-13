@@ -35,7 +35,7 @@ class NarrationTask(str, Enum):
     SPEAK_COMPARISON = "speak_comparison"  # speak the Comparison agent's analysis
     CART_UPDATE = "cart_update"           # confirm what happened to the cart
     CHECKOUT_REMINDER = "checkout_reminder"  # before checkout: the one item they might have forgotten
-    CAPSULE = "capsule"                   # the outfit plan on the board: what was planned or changed
+    OUTFIT = "outfit"                     # the outfit on the board: what was planned or changed
 
 
 # Lights up each option on screen while Scout talks about it (the frontend reads and hides the tags).
@@ -153,24 +153,25 @@ In one or two short, natural sentences, like a helpful friend at the till: say t
 """
 
 
-CAPSULE = """{voice}
-You plan outfits like a stylist friend: their own clothes first, and only the few new pieces worth buying. The plan is also shown on screen as a board, one row per look.
+OUTFIT = """{voice}
+You plan outfits like a stylist friend: their own clothes first, then new pieces from the shop. The looks are also shown on screen as a board, one row per look.
 
 WHAT JUST HAPPENED
 {event}
 
-THE PLAN
-{capsule}
+THE LOOKS
+{outfit}
 {options}
 YOUR TASK
 {task}
-Use only what THE PLAN and the options say. Say "your" for the pieces they own. Never read every look piece by piece.
+Use only what THE LOOKS and the options say. Say "your" for the pieces they own. Never read every look piece by piece.
 """
 
 # The end of every reply about the board, so the shopper always knows what they can do next.
-BOARD_DONE = "End by asking whether they would like to swap a piece, try a look on, or add the new pieces to their cart."
-CHOOSING_ENDS = ("End by asking which one they like, or whether they would like other options or to skip this piece. "
-                 "If there are no options, say so kindly and offer to skip it or look for something different.")
+BOARD_DONE = ("End by asking whether they would like to change or remove a piece in a look, try a look on, or add "
+              "the new pieces to their cart.")
+CHOOSING_ENDS = ("End by asking which one they like, or whether they would like other options. If there are no "
+                 "options, say so kindly and offer to look for something different or leave that look as it is.")
 
 
 class NarrationAgentBuilder:
@@ -185,7 +186,7 @@ class NarrationAgentBuilder:
             NarrationTask.SPEAK_COMPARISON: self._speak_comparison_prompt,
             NarrationTask.CART_UPDATE: self._cart_update_prompt,
             NarrationTask.CHECKOUT_REMINDER: self._checkout_reminder_prompt,
-            NarrationTask.CAPSULE: self._capsule_prompt,
+            NarrationTask.OUTFIT: self._outfit_prompt,
         }
 
     def build(self) -> LlmAgent:
@@ -277,42 +278,33 @@ class NarrationAgentBuilder:
         )
 
 
-    def _capsule_prompt(self, state: dict) -> str:
-        capsule = state_keys.capsule(state)
-        event = state.get(state_keys.CAPSULE_EVENT) or "They asked about the plan."
-        piece = capsule.new_piece(capsule.current) if capsule and capsule.current else None
+    def _outfit_prompt(self, state: dict) -> str:
+        outfit = state_keys.outfit(state)
+        event = state.get(state_keys.OUTFIT_EVENT) or "They asked about the plan."
+        change = outfit.changing if outfit and outfit.changing and outfit.changing.looks else None
         options = ""
-        if piece is not None:                    # guided: they are choosing this piece now
-            suits = [f"- option {n}: {capsule.fit_notes[pid]}"
-                     for n, pid in enumerate(state.get(state_keys.PRESENTED) or [], start=1) if pid in capsule.fit_notes]
-            options = (f"\nOPTIONS FOR THE {piece.category.upper()} (what to look for: {piece.looks_like})\n"
-                       f"{_search_note(state, capsule.need_for(piece, state_keys.need(state)))}\n"
+        if change is not None:                   # they are choosing a piece for some looks now
+            suits = [f"- option {n}: {outfit.fit_notes[pid]}"
+                     for n, pid in enumerate(state.get(state_keys.PRESENTED) or [], start=1) if pid in outfit.fit_notes]
+            options = (f"\nOPTIONS FOR THE {change.category.upper()} IN {change.looks_text().upper()}\n"
+                       f"{_search_note(state, outfit.need_for(change, state_keys.need(state)))}\n"
                        f"{_presented_text(state)}\n"
                        + ("WHY EACH SUITS THE OCCASION (say this for each one)\n" + "\n".join(suits) + "\n"
                           if suits else ""))
-            present = (f"present these options for the {piece.category} in about 60 to 90 words: how each would "
-                       "suit the occasion and go with the rest of the outfit, honest about [exact match] vs "
-                       f"[related], making the order clear.\n{SCREEN_CUE}\n{CHOOSING_ENDS}")
-            if event == state_keys.CAPSULE_PLANNED:
-                task = ("Share the plan in one or two short sentences: the pieces you would put together for this "
-                        "occasion and why, and that you will choose them together one at a time, starting with the "
-                        f"{piece.category}. Do not repeat that you are planning. Then {present}")
-            else:
-                task = f"React to what just happened in one short sentence. Then {present}"
-        elif capsule and capsule.guided:         # guided, and every piece is settled
-            task = ("In two to four short sentences, describe the whole outfit together like a stylist friend: how "
-                    f"the pieces work for the occasion, and the total. {BOARD_DONE}")
-        elif event == state_keys.CAPSULE_PLANNED:
-            task = ("In about 60 to 100 words, share the plan: how many looks, how much comes from their own wardrobe, "
-                    "and which few new pieces you suggest buying, each with how many looks it unlocks. Do not list "
-                    "the pieces you left out; at most say in a few words that you left out ones that don't suit it. Mention the total, and the budget if they gave "
-                    "one. If a new piece could not be found in the shop, say so honestly. Do not repeat that you "
-                    f"are planning: you already said so. {BOARD_DONE}")
+            task = (f"React to what just happened in one short sentence. Then present these options for the "
+                    f"{change.category} in about 60 to 90 words: how each would suit the occasion and go with the rest "
+                    f"of {change.looks_text()}, honest about [exact match] vs [related], making the order clear.\n"
+                    f"{SCREEN_CUE}\n{CHOOSING_ENDS}")
+        elif event == state_keys.OUTFIT_PLANNED:
+            task = ("In about 60 to 100 words, share the plan: how many looks, what each is for in a few words, how "
+                    "much comes from their own wardrobe, and the new pieces. Mention the total, and the budget if they "
+                    "gave one. If a new piece could not be found in the shop, say so honestly. At most say in a few "
+                    "words that you left out pieces of theirs that don't suit it. Do not repeat that you are planning: "
+                    f"you already said so. {BOARD_DONE}")
         else:
-            task = ("In a few short sentences, react to what just happened, then say how it changes the plan and the "
-                    f"total. {BOARD_DONE}")
-        return CAPSULE.format(voice=VOICE, event=event, capsule=capsule.to_prompt_text() if capsule else "None.",
-                              options=options, task=task)
+            task = f"In a few short sentences, react to what just happened and say the new total. {BOARD_DONE}"
+        return OUTFIT.format(voice=VOICE, event=event, outfit=outfit.to_prompt_text() if outfit else "None.",
+                             options=options, task=task)
 
 
 def _heard_text(heard: int) -> str:

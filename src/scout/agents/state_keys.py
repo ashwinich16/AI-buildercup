@@ -8,8 +8,11 @@ user-scoped: they belong to the shopper and are shared across their sessions.
 
 from typing import Optional
 
-from scout.domain import Capsule, PreferenceProfile, Product, ShoppingNeed, WardrobeItem
+from pydantic import ValidationError
+
+from scout.domain import Outfit, PreferenceProfile, Product, ShoppingNeed, TasteProfile, WardrobeItem
 from scout.tools.cart import Cart
+from scout.tools.wishlist import Wishlist
 from scout.tools.recommendations import Suggestion
 
 # Current conversation
@@ -52,19 +55,26 @@ CHECKOUT_REMINDED = "checkout_reminded"  # the one reminder before checkout was 
 # Planning outfits for any occasion (a trip, a week, a day at the office...)
 MODE = "mode"                        # "outfit" while planning an outfit, until it is finished or they leave it
 OUTFIT_MODE = "outfit"
-STYLIST_PLAN = "stylist_plan"        # the Stylist agent's latest CapsulePlan
-CAPSULE = "capsule"                  # the plan on the board (looks + the products chosen for new pieces), or None
-OUTFIT_REQUESTED = "outfit_requested"  # asked for, waiting on one question (whose style): True or None
-CAPSULE_EVENT = "capsule_event"      # what just happened to the plan, in plain words, for Narration to speak
-CAPSULE_PLANNED = "A new plan was just made."   # the CAPSULE_EVENT for a fresh plan
+STYLIST_PLAN = "stylist_plan"        # the Stylist agent's latest OutfitPlan
+OUTFIT = "outfit_board"              # the Outfit on the board (every look with its own pieces), or None
+OUTFIT_REQUESTED = "outfit_requested"  # a plan was asked for, waiting on one answer (the occasion or whose style)
+OUTFIT_EVENT = "outfit_event"        # what just happened to the outfit, in plain words, for Narration to speak
+OUTFIT_PLANNED = "A new plan was just made."   # the OUTFIT_EVENT for a fresh plan
 PREFERENCE_EVIDENCE = "preference_evidence"  # what the Preference agent should learn from this turn
+PREFERENCE_PENDING = "preference_pending"    # turns to learn from after they end: [{"evidence", "message"}]
 
 # What Scout remembers about the shopper. Loaded from the ShopperRepository (Cloud SQL)
 # when a conversation starts and saved back after any turn that changes it.
 SHOPPER_NAME = "shopper_name"        # what the shopper asked Scout to call them
 CART = "cart"
+WISHLIST = "wishlist"                # products they saved to come back to, compare or buy later
+WISHLIST_EVENT = "wishlist_event"    # what just happened to the wishlist, said by code
 PREFERENCES = "preferences"
+TASTE = "taste"                      # colours, materials, patterns, styles they lean towards (learned)
+TASTE_EVIDENCE = "taste_evidence"    # items bought, saved or owned this turn, read in the background
 WARDROBE = "wardrobe"                # clothes they already own (list of WardrobeItem dicts)
+LOOK_COUNT = "look_count"            # how many looks they asked for in the outfit plan, or None (one per occasion)
+SET_ASIDE = "set_aside"              # ids of their own pieces not to use in this plan ("I don't have it with me")
 WARDROBE_JUST_ADDED = "wardrobe_just_added"  # ids of pieces added from photos since Scout last replied
 
 # Kept by ADK across this shopper's sessions (in memory); moves to BigQuery with the analytics work
@@ -83,8 +93,23 @@ def profile(state) -> PreferenceProfile:
     return PreferenceProfile.model_validate(state.get(PREFERENCES) or {})
 
 
+def taste(state) -> TasteProfile:
+    return TasteProfile.model_validate(state.get(TASTE) or {})
+
+
+def taste_text(state) -> str:
+    """Their taste for the style being shopped (any style when it is not known yet), without what they said
+    they avoid: what they say always wins over what was learned."""
+    avoid = {p.value.strip().lower() for p in profile(state).preferences if p.polarity == "avoid"}
+    return taste(state).to_prompt_text(need(state).gender_filter(), avoid)
+
+
 def cart(state) -> Cart:
     return Cart.model_validate(state.get(CART) or {})
+
+
+def wishlist(state) -> Wishlist:
+    return Wishlist.model_validate(state.get(WISHLIST) or {})
 
 
 def shortlist(state) -> dict[str, Product]:
@@ -129,10 +154,13 @@ def suggestions(state) -> list[Suggestion]:
         [Suggestion.model_validate(state.get(SUGGESTION))]
 
 
-def capsule(state) -> Optional[Capsule]:
-    """The outfit plan on the board, if any."""
-    raw = state.get(CAPSULE)
-    return Capsule.model_validate(raw) if raw else None
+def outfit(state) -> Optional[Outfit]:
+    """The outfit on the board, if any (one saved in an older shape is not shown)."""
+    raw = state.get(OUTFIT)
+    try:
+        return Outfit.model_validate(raw) if raw else None
+    except ValidationError:
+        return None
 
 
 def wardrobe(state) -> list[WardrobeItem]:
@@ -161,3 +189,9 @@ def recent_turns_text(state) -> str:
 def planning_outfit(state) -> bool:
     """In outfit mode: every request is for the outfit until it is finished or they ask for regular shopping."""
     return state.get(MODE) == OUTFIT_MODE
+
+
+def usable_wardrobe(state) -> list[WardrobeItem]:
+    """Their own pieces the outfit plan may use: the wardrobe, without the ones they set aside for now."""
+    aside = set(state.get(SET_ASIDE) or [])
+    return [item for item in wardrobe(state) if item.id not in aside]

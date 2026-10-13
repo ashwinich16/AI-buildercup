@@ -15,6 +15,7 @@ Two kinds of memory:
 import asyncio
 import logging
 import re
+import time
 from typing import AsyncIterator, Literal, Optional
 
 from google.adk.agents import BaseAgent
@@ -29,12 +30,14 @@ from scout.agents import state_keys
 from scout.agents.elicitation import read_turn
 from scout.agents.model_io import content_text
 from scout.api.shopper_repository import ConversationStore, ShopperMemory, ShopperRepository
-from scout.domain import Capsule, Preference, PreferenceProfile, Product, WardrobeItem
-from scout.tools import Cart, CartItem, EvidencePicker
+from scout.domain import Outfit, Preference, PreferenceProfile, Product, Traits, WardrobeItem
+from scout.tools import Cart, CartItem, EvidencePicker, WishlistItem
+from scout.tools.taste_reader import TasteReader
 
 logger = logging.getLogger(__name__)
 
 APP_NAME = "scout"
+LEARNING_APP = "scout-learning"      # the Preference agent's own runner, used after a turn has ended
 _EVIDENCE = EvidencePicker()
 
 
@@ -62,6 +65,10 @@ class CartView(BaseModel):
     total: float = 0.0
 
 
+class WishlistView(BaseModel):
+    items: list[WishlistItem] = Field(default_factory=list)
+
+
 class SmallProductCard(BaseModel):
     """A product shown small: the suggested item, or a new piece on the outfit board."""
     id: str
@@ -75,11 +82,12 @@ class SmallProductCard(BaseModel):
 
 class BoardTile(BaseModel):
     """One piece of a look: something they own, or a new piece from the shop."""
+    category: str                                          # what the Change / Remove buttons name
     description: str
     image_url: Optional[str] = None
     owned: bool = False
-    pending: bool = False                                  # guided: a new piece not chosen yet (an empty slot)
-    current: bool = False                                  # guided: the piece being chosen now
+    missing: bool = False                                  # a new piece nothing suitable was found for
+    changing: bool = False                                 # the options on screen are for this piece
 
 
 class LookView(BaseModel):
@@ -90,30 +98,21 @@ class LookView(BaseModel):
     wardrobe_ids: list[str] = Field(default_factory=list)  # their own pieces in it, tried on with the new ones
 
 
-class NewPieceView(BaseModel):
-    key: str
-    category: str
-    why: str = ""
-    looks: int = 0                                         # how many looks it is worn in
-    product: Optional[SmallProductCard] = None             # None: not chosen yet, skipped, or none in the shop
-    current: bool = False                                  # guided: being chosen now
-    skipped: bool = False
-
-
 class CapsuleView(BaseModel):
-    """The outfit board: one look per day or occasion, and the few new pieces to buy."""
+    """The outfit board: the looks, each with its own pieces, and the new products to buy."""
     occasion: str
     looks: list[LookView] = Field(default_factory=list)
-    new_pieces: list[NewPieceView] = Field(default_factory=list)
+    to_buy: list[SmallProductCard] = Field(default_factory=list)   # every new product once
     total: float = 0.0
     budget: Optional[float] = None
-    guided: bool = False                                   # they choose each new piece, one at a time
+    changing: Optional[str] = None                         # e.g. "shoe for look 1": what the options are for
 
 
 class ScreenState(BaseModel):
     products: list[ProductCard] = Field(default_factory=list)
     focus_product_id: Optional[str] = None
     cart: CartView = Field(default_factory=CartView)
+    wishlist: WishlistView = Field(default_factory=WishlistView)
     suggestion: Optional[SmallProductCard] = None
     suggestions: list[SmallProductCard] = Field(default_factory=list)   # the few options shown in the pop-up
     # The product Scout is describing when it is not one of the cards above (e.g. the suggested item):
@@ -143,12 +142,21 @@ class StartedSession(ScreenState):
     history: list[ChatMessage] = Field(default_factory=list)  # that conversation so far, to show again
     shopper_name: str = ""            # what Scout calls the shopper
     categories: list[str] = Field(default_factory=list)   # what the shop sells: first things to ask for
+    try_on_adjustable: bool = False   # the try-on can follow "tuck the shirt in" (so the screen offers it)
 
 
 class ScoutChatService:
-    def __init__(self, agent: BaseAgent, shoppers: ShopperRepository, conversations: ConversationStore):
+    def __init__(self, agent: BaseAgent, shoppers: ShopperRepository, conversations: ConversationStore,
+                 taste_reader: Optional[TasteReader] = None, learner: Optional[BaseAgent] = None):
         self._shoppers = shoppers
         self._conversations = conversations
+        self._taste_reader = taste_reader        # learns their taste from what they buy, save and own
+        # The Preference agent learns from a turn after it has ended, in a scratch session of its own, so the
+        # shopper can carry on talking while it thinks.
+        self._learning_sessions = InMemorySessionService()
+        self._learning = Runner(app_name=LEARNING_APP, agent=learner,
+                                session_service=self._learning_sessions) if learner else None
+        self._learning_lock = asyncio.Lock()     # one learning at a time, so two never overwrite each other
         self._saving: set[asyncio.Task] = set()    # conversation saves running in the background
         self._sessions = InMemorySessionService()
         self._runner = Runner(app_name=APP_NAME, agent=agent, session_service=self._sessions)
@@ -165,14 +173,16 @@ class ScoutChatService:
         """
         memory = await asyncio.to_thread(self._shoppers.load, user_id)
         returning = memory.known
-        if preferred_name:
+        renamed = bool(preferred_name) and preferred_name != memory.preferred_name
+        if renamed:
             memory.preferred_name = preferred_name
         if seed_preferences and not returning:
             memory.preferences = PreferenceProfile().merge(seed_preferences, [])
-        await asyncio.to_thread(self._shoppers.save, user_id, memory)   # also records this visit
+        if renamed or not returning:        # saved only when something changed: every query is time at the door
+            await asyncio.to_thread(self._shoppers.save, user_id, memory)
 
         name = memory.preferred_name or display_name
-        session = None if fresh else await self._last_conversation(user_id)
+        session = None if fresh else await self._last_conversation(user_id, memory)
         if session is not None:
             return StartedSession(session_id=session.id, greeting=_welcome_back(name), shopper_name=name,
                                   resumed=True, history=_history(session.state),
@@ -185,11 +195,11 @@ class ScoutChatService:
         return StartedSession(session_id=session.id, greeting=greeting, shopper_name=name,
                               **_screen_from_state(session.state).model_dump())
 
-    async def _last_conversation(self, user_id: str):
+    async def _last_conversation(self, user_id: str, memory: ShopperMemory):
         """The shopper's most recent conversation, if there is one worth carrying on (something was said)."""
         try:
             session_id = await asyncio.to_thread(self._conversations.latest_conversation, user_id)
-            session = await self._get(user_id, session_id) if session_id else None
+            session = await self._get(user_id, session_id, memory) if session_id else None
         except Exception:                   # can't reach it: a new conversation is always fine
             logger.exception("Could not load the last conversation for shopper %s", user_id)
             return None
@@ -235,6 +245,8 @@ class ScoutChatService:
         session = await self._get(user_id, session_id)
         await self._remember(user_id, before, _memory_from_state(session.state))
         self._keep_conversation_later(user_id, session)   # never makes the shopper wait
+        if session.state.get(state_keys.TASTE_EVIDENCE) or session.state.get(state_keys.PREFERENCE_PENDING):
+            self._in_background(self._learn(user_id, session_id))   # nor does learning from it
         turn = read_turn(session.state)
         action = _ACTIONS.get(turn.intent) if turn else None
         reply = "\n\n".join(replies)
@@ -264,11 +276,11 @@ class ScoutChatService:
         order asked. Raises LookupError if this shopper has no such conversation."""
         state = (await self._get(user_id, session_id)).state
         known = dict(state_keys.shortlist(state))
-        suggestion, capsule = state_keys.suggestion(state), state_keys.capsule(state)
+        suggestion, outfit = state_keys.suggestion(state), state_keys.outfit(state)
         if suggestion:
             known[suggestion.product.id] = suggestion.product
-        if capsule:
-            known.update({product.id: product for product in capsule.products_to_buy()})
+        if outfit:
+            known.update({product.id: product for product in outfit.products_to_buy()})
         return [known[i] for i in product_ids if i in known]
 
     async def wardrobe_items(self, user_id: str, session_id: str, item_ids: list[str]) -> list[WardrobeItem]:
@@ -276,18 +288,19 @@ class ScoutChatService:
         owned = {item.id: item for item in state_keys.wardrobe((await self._get(user_id, session_id)).state)}
         return [owned[i] for i in item_ids if i in owned]
 
-    async def add_to_wardrobe(self, user_id: str, session_id: str, added: list[WardrobeItem]) -> list[WardrobeItem]:
-        """Remember pieces the shopper owns (from a photo). Scout mentions them in its next reply.
-        Returns the whole wardrobe."""
+    async def add_to_wardrobe(self, user_id: str, session_id: str, added: list[WardrobeItem],
+                              traits: Optional[list[tuple[Traits, str]]] = None) -> list[WardrobeItem]:
+        """Remember pieces the shopper owns (from a photo), and what each says about their taste (its traits and
+        the style it is cut for). Scout mentions them in its next reply. Returns the whole wardrobe."""
         return await self._change_wardrobe(user_id, session_id, lambda items: [*items, *added],
-                                           just_added=[item.id for item in added])
+                                           just_added=[item.id for item in added], traits=traits)
 
     async def remove_from_wardrobe(self, user_id: str, session_id: str, item_id: str) -> list[WardrobeItem]:
         return await self._change_wardrobe(user_id, session_id,
                                            lambda items: [i for i in items if i.id != item_id])
 
-    async def _change_wardrobe(self, user_id: str, session_id: str, change,
-                               just_added: Optional[list[str]] = None) -> list[WardrobeItem]:
+    async def _change_wardrobe(self, user_id: str, session_id: str, change, just_added: Optional[list[str]] = None,
+                               traits: Optional[list[tuple[Traits, str]]] = None) -> list[WardrobeItem]:
         """Change the wardrobe in this conversation (so Scout knows at once) and in the shopper's memory."""
         session = await self._get(user_id, session_id)
         before = _memory_from_state(session.state)
@@ -295,22 +308,102 @@ class ScoutChatService:
         kept = {item.id for item in wardrobe}
         shown = [i for i in [*(session.state.get(state_keys.WARDROBE_JUST_ADDED) or []), *(just_added or [])]
                  if i in kept]
+        taste = before.taste.model_copy(deep=True)
+        for piece_traits, made_for in traits or []:          # each new piece counted once, as it is added
+            taste.learn(piece_traits, made_for, "owned")
         delta = {state_keys.WARDROBE: [item.model_dump() for item in wardrobe],
-                 state_keys.WARDROBE_JUST_ADDED: shown}
+                 state_keys.WARDROBE_JUST_ADDED: shown, state_keys.TASTE: taste.model_dump()}
         await self._sessions.append_event(session, Event(author="user", actions=EventActions(state_delta=delta)))
-        await self._remember(user_id, before, before.model_copy(update={"wardrobe": wardrobe}))
+        await self._remember(user_id, before, before.model_copy(update={"wardrobe": wardrobe, "taste": taste}))
         return wardrobe
 
-    async def _get(self, user_id: str, session_id: str):
+    async def _learn(self, user_id: str, session_id: str) -> None:
+        """Everything this turn taught, after it has ended: lasting preferences, then taste."""
+        async with self._learning_lock:
+            await self._learn_preferences(user_id, session_id)
+            await self._learn_taste(user_id, session_id)
+
+    async def _learn_preferences(self, user_id: str, session_id: str) -> None:
+        """The Preference agent learns from each turn waiting for it, in order, starting from their profile as it
+        is now. Then the result goes into the conversation and their memory. A failure teaches nothing."""
+        try:
+            session = await self._get(user_id, session_id)
+            pending = list(session.state.get(state_keys.PREFERENCE_PENDING) or [])
+            if not pending or self._learning is None:
+                return
+            started = time.perf_counter()
+            known = {state_keys.PREFERENCES: session.state.get(state_keys.PREFERENCES) or {},
+                     state_keys.TASTE: session.state.get(state_keys.TASTE) or {}}
+            taste_before = {mark.value for mark in state_keys.taste(known).marks}
+            for item in pending:
+                known = await self._run_learner(user_id, known, item)
+            session = await self._get(user_id, session_id)          # the latest, after learning
+            before = _memory_from_state(session.state)
+            taste = before.taste.model_copy(deep=True)
+            taste.forget(sorted(taste_before - {mark.value for mark in state_keys.taste(known).marks}))   # "forget navy"
+            preferences = state_keys.profile(known)
+            left = [p for p in session.state.get(state_keys.PREFERENCE_PENDING) or [] if p not in pending]
+            delta = {state_keys.PREFERENCES: preferences.model_dump(), state_keys.TASTE: taste.model_dump(),
+                     state_keys.PREFERENCE_PENDING: left}
+            await self._sessions.append_event(session, Event(author="user", actions=EventActions(state_delta=delta)))
+            await self._remember(user_id, before, before.model_copy(update={"preferences": preferences,
+                                                                            "taste": taste}))
+            logger.info("Learned from %d turns in %.1fs", len(pending), time.perf_counter() - started)
+        except Exception:
+            logger.exception("Could not learn preferences for shopper %s", user_id)
+
+    async def _run_learner(self, user_id: str, known: dict, item: dict) -> dict:
+        """One run of the Preference agent, on a scratch session holding only what it reads and writes."""
+        scratch = await self._learning_sessions.create_session(
+            app_name=LEARNING_APP, user_id=user_id, state={**known, state_keys.PREFERENCE_EVIDENCE: item.get("evidence")})
+        message = types.Content(role="user", parts=[types.Part(text=item.get("message") or "")])
+        try:
+            async for _ in self._learning.run_async(user_id=user_id, session_id=scratch.id, new_message=message):
+                pass
+            scratch = await self._learning_sessions.get_session(app_name=LEARNING_APP, user_id=user_id,
+                                                                session_id=scratch.id)
+            return {key: scratch.state.get(key) or {} for key in known}
+        finally:
+            await self._learning_sessions.delete_session(app_name=LEARNING_APP, user_id=user_id, session_id=scratch.id)
+
+    async def _learn_taste(self, user_id: str, session_id: str) -> None:
+        """What was bought, saved or added this turn: each item's traits are read (one call for all of them) and
+        counted into their taste. Runs after the turn, so it never holds up a reply; a failure teaches nothing."""
+        try:
+            session = await self._get(user_id, session_id)
+            queued = list(session.state.get(state_keys.TASTE_EVIDENCE) or [])
+            if not queued or self._taste_reader is None:
+                return
+            known = sorted({mark.value for mark in state_keys.taste(session.state).marks})
+            traits = await asyncio.to_thread(self._taste_reader.read, [q["text"] for q in queued], known)
+            session = await self._get(user_id, session_id)          # the latest, after the read
+            before = _memory_from_state(session.state)
+            taste = before.taste.model_copy(deep=True)
+            for item, item_traits in zip(queued, traits):
+                taste.learn(item_traits, item.get("style"), item["signal"])
+            left = [q for q in session.state.get(state_keys.TASTE_EVIDENCE) or [] if q not in queued]
+            delta = {state_keys.TASTE: taste.model_dump(), state_keys.TASTE_EVIDENCE: left}
+            await self._sessions.append_event(session, Event(author="user", actions=EventActions(state_delta=delta)))
+            await self._remember(user_id, before, before.model_copy(update={"taste": taste}))
+        except Exception:
+            logger.exception("Could not learn taste for shopper %s", user_id)
+
+    def _in_background(self, work) -> None:
+        task = asyncio.create_task(work)
+        self._saving.add(task)                       # keep a reference until it is done
+        task.add_done_callback(self._saving.discard)
+
+    async def _get(self, user_id: str, session_id: str, memory: Optional[ShopperMemory] = None):
         """This shopper's conversation: from memory, or rebuilt from its saved summary (after a restart, or
-        on another instance). Raises LookupError if there is neither."""
+        on another instance), with `memory` if it was just loaded. Raises LookupError if there is neither."""
         session = await self._sessions.get_session(app_name=APP_NAME, user_id=user_id, session_id=session_id)
         if session is not None:
             return session
         summary = await asyncio.to_thread(self._conversations.load_conversation, user_id, session_id)
         if summary is None:
             raise LookupError("Conversation not found")
-        memory = await asyncio.to_thread(self._shoppers.load, user_id)   # always the latest cart and wardrobe
+        if memory is None:                   # always the latest cart and wardrobe
+            memory = await asyncio.to_thread(self._shoppers.load, user_id)
         try:
             return await self._sessions.create_session(app_name=APP_NAME, user_id=user_id, session_id=session_id,
                                                        state={**summary, **_state_from_memory(memory)})
@@ -349,20 +442,23 @@ class ScoutChatService:
 
 def _summary(state: dict) -> dict:
     """What is saved of a conversation: its session state, without what the shopper's memory already keeps
-    (name, preferences, cart, wardrobe) or ADK's per-user keys."""
+    (name, preferences, taste, cart, wishlist, wardrobe) or ADK's per-user keys."""
     return {key: value for key, value in state.items()
             if key not in _MEMORY_KEYS and not key.startswith(("user:", "app:", "temp:"))}
 
 
 # Session keys that come from the shopper's memory (ShopperRepository), so a conversation summary leaves them out.
-_MEMORY_KEYS = {state_keys.SHOPPER_NAME, state_keys.PREFERENCES, state_keys.CART, state_keys.WARDROBE}
+_MEMORY_KEYS = {state_keys.SHOPPER_NAME, state_keys.PREFERENCES, state_keys.TASTE, state_keys.CART,
+                state_keys.WISHLIST, state_keys.WARDROBE}
 
 
 def _state_from_memory(memory: ShopperMemory) -> dict:
     return {
         state_keys.SHOPPER_NAME: memory.preferred_name,
         state_keys.PREFERENCES: memory.preferences.model_dump(),
+        state_keys.TASTE: memory.taste.model_dump(),
         state_keys.CART: memory.cart.model_dump(),
+        state_keys.WISHLIST: memory.wishlist.model_dump(),
         state_keys.WARDROBE: [item.model_dump() for item in memory.wardrobe],
     }
 
@@ -372,7 +468,9 @@ def _memory_from_state(state: dict) -> ShopperMemory:
         known=True,
         preferred_name=state.get(state_keys.SHOPPER_NAME) or "",
         preferences=state_keys.profile(state),
+        taste=state_keys.taste(state),
         cart=state_keys.cart(state),
+        wishlist=state_keys.wishlist(state),
         wardrobe=state_keys.wardrobe(state),
     )
 
@@ -459,8 +557,9 @@ def _screen_from_state(state: dict) -> ScreenState:
     cart = state_keys.cart(state)
     return ScreenState(products=cards, focus_product_id=state.get(state_keys.FOCUS_PRODUCT),
                        cart=CartView(items=cart.items, total=cart.total),
-                       suggestion=_suggestion_card(state), capsule=_capsule_view(state.get(state_keys.CAPSULE),
-                                                                         state_keys.wardrobe(state)),
+                       wishlist=WishlistView(items=state_keys.wishlist(state).items),
+                       suggestion=_suggestion_card(state),
+                       capsule=_capsule_view(state_keys.outfit(state), state_keys.wardrobe(state)),
                        planning_outfit=state_keys.planning_outfit(state),
                        wardrobe=state_keys.wardrobe(state), spotlight=spotlight,
                        suggestions=[_small_card(s.product).model_copy(update={"goes_with": s.goes_with,
@@ -476,36 +575,35 @@ def _suggestion_card(state: dict) -> Optional[SmallProductCard]:
                                                              "reasons": suggestion.reasons})
 
 
-def _capsule_view(raw: Optional[dict], wardrobe: list[WardrobeItem]) -> Optional[CapsuleView]:
-    """The board. Pictures of their own pieces come from their wardrobe (the plan keeps only the words)."""
-    if not raw:
+def _capsule_view(outfit: Optional[Outfit], wardrobe: list[WardrobeItem]) -> Optional[CapsuleView]:
+    """The board. Pictures of their own pieces come from their wardrobe (the outfit keeps only the words)."""
+    if outfit is None:
         return None
-    capsule = Capsule.model_validate(raw)
     pictures = {item.id: item.thumbnail for item in wardrobe}
-    owned = {item.id: item.model_copy(update={"thumbnail": pictures.get(item.id)}) for item in capsule.wardrobe}
+    change = outfit.changing if outfit.changing and outfit.changing.looks else None
     looks = []
-    for look in capsule.plan.looks:
+    for number, look in enumerate(outfit.looks):
         tiles = []
         for piece in look.pieces:
-            if piece.owned in owned:
-                item = owned[piece.owned]
-                tiles.append(BoardTile(description=item.description, image_url=item.thumbnail, owned=True))
-            elif piece.new in capsule.picks:
-                card = _small_card(capsule.picks[piece.new])
-                tiles.append(BoardTile(description=card.name, image_url=card.image_url))
-            elif capsule.guided and (new := capsule.new_piece(piece.new or "")) and new.key not in capsule.skipped:
-                tiles.append(BoardTile(description=new.category, pending=True, current=new.key == capsule.current))
+            changing = change is not None and number in change.looks and \
+                piece.category.lower() == change.category.lower()
+            if piece.owned:
+                item = outfit.owned_item(piece.owned)
+                tiles.append(BoardTile(category=piece.category, description=item.description if item else piece.category,
+                                       image_url=pictures.get(piece.owned), owned=True, changing=changing))
+            elif piece.product is not None:
+                card = _small_card(piece.product)
+                tiles.append(BoardTile(category=piece.category, description=card.name, image_url=card.image_url,
+                                       changing=changing))
+            else:
+                tiles.append(BoardTile(category=piece.category, description=f"No {piece.category} found yet",
+                                       missing=True, changing=changing))
         looks.append(LookView(title=look.title, why=look.why, tiles=tiles,
-                              product_ids=[p.id for p in capsule.look_products(look)],
-                              wardrobe_ids=[p.owned for p in look.pieces if p.owned in owned and owned[p.owned].thumbnail]))
-    worn = [piece.new for look in capsule.plan.looks for piece in look.pieces if piece.new]
-    new_pieces = [NewPieceView(key=p.key, category=p.category, why=p.why, looks=worn.count(p.key),
-                               product=_small_card(capsule.picks[p.key]) if p.key in capsule.picks else None,
-                               current=p.key == capsule.current, skipped=p.key in capsule.skipped)
-                  for p in capsule.plan.new_pieces]
-    total = sum(p.price or 0 for p in capsule.products_to_buy())
-    return CapsuleView(occasion=capsule.plan.occasion, looks=looks, new_pieces=new_pieces,
-                       total=round(total, 2), budget=capsule.budget, guided=capsule.guided)
+                              product_ids=[p.id for p in outfit.look_products(number)],
+                              wardrobe_ids=[p.owned for p in look.pieces if p.owned and pictures.get(p.owned)]))
+    return CapsuleView(occasion=outfit.occasion, looks=looks, to_buy=[_small_card(p) for p in outfit.products_to_buy()],
+                       total=outfit.total(), budget=outfit.budget,
+                       changing=f"{change.category} for {change.looks_text()}" if change else None)
 
 
 def _small_card(product: Product) -> SmallProductCard:

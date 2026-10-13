@@ -52,6 +52,7 @@ AGENT_TUNING_DEFAULTS = {
     "stylist": AgentTuning(temperature=0.6, thinking_budget=512),           # plans looks from the wardrobe
     "wardrobe": AgentTuning(temperature=0.2, thinking_budget=0),            # describes a photo of owned clothes
     "occasion": AgentTuning(temperature=0.1, thinking_budget=512),         # judges each product for the occasion
+    "taste": AgentTuning(temperature=0.1, thinking_budget=0),               # reads colours, materials... (background)
 }
 
 
@@ -75,8 +76,10 @@ class Settings:
     # Elicitation
     elicitation_safety_max_questions: int   # guard against loops, not a target
 
-    # Virtual try-on (Vertex AI)
-    try_on_model: str
+    # Try-on: "gemini" (Gemini's image model, follows instructions) or "vto" (Vertex AI Virtual Try-On)
+    try_on_engine: str
+    try_on_image_model: str     # the Gemini image model, for "gemini"
+    try_on_model: str           # the Virtual Try-On model, for "vto"
     try_on_location: str        # virtual try-on is offered in a few regions only
 
     # Web app
@@ -140,6 +143,8 @@ class Settings:
             agent_tuning={name: _tuning_from_env(name, default)
                           for name, default in AGENT_TUNING_DEFAULTS.items()},
             elicitation_safety_max_questions=int(_optional("SCOUT_ELICITATION_SAFETY_MAX_QUESTIONS", "6")),
+            try_on_engine=_optional("SCOUT_TRY_ON_ENGINE", "gemini").lower(),
+            try_on_image_model=_optional("SCOUT_TRY_ON_IMAGE_MODEL", "gemini-2.5-flash-image"),
             try_on_model=_optional("SCOUT_TRY_ON_MODEL", "virtual-try-on-001"),
             try_on_location=_optional("SCOUT_TRY_ON_LOCATION", "us-central1"),
             auth_mode=_optional("SCOUT_AUTH_MODE", "demo").lower(),

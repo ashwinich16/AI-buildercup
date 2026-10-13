@@ -40,11 +40,12 @@ from scout.api.personas import load_personas
 from scout.api.shopper_repository import build_shopper_repository
 from scout.api.speech import SpeechSynthesizer
 from scout.api.warmup import keep_warm
-from scout.app import build_catalog, build_root_agent
+from scout.app import build_catalog, build_learner, build_root_agent
 from scout.catalog import SearchQuery
 from scout.config import Settings, get_settings
 from scout.tools import ImageFetcher
-from scout.tools.try_on import TryOnError, TryOnStudio
+from scout.tools.taste_reader import TasteReader
+from scout.tools.try_on import TryOnError, build_try_on_studio
 from scout.tools.wardrobe import WardrobeTagger
 
 logging.basicConfig(level=logging.INFO)
@@ -70,10 +71,11 @@ class SpeechRequest(BaseModel):
 
 class TryOnRequest(BaseModel):
     session_id: str
-    product_ids: list[str] = Field(default_factory=list, max_length=4)   # one product, or an outfit's new pieces
-    wardrobe_ids: list[str] = Field(default_factory=list, max_length=4)  # their own pieces in that look
+    product_ids: list[str] = Field(default_factory=list)    # one product, or the new pieces of one look
+    wardrobe_ids: list[str] = Field(default_factory=list)   # their own pieces in that look
     photo: str                                                   # the shopper's photo, base64
     mime_type: str = Field(default="image/jpeg", pattern=r"^image/(jpeg|png)$")   # what the model accepts
+    wish: str = Field(default="", max_length=200)                # how to wear it, e.g. "tuck the shirt in"
 
 
 class WardrobePhotoRequest(BaseModel):
@@ -97,10 +99,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     catalog = build_catalog(settings)
     root = build_root_agent(settings, catalog)
     store = build_shopper_repository(settings)          # the shopper's memory and the conversation summaries
-    chat = ScoutChatService(root, store, store)
+    chat = ScoutChatService(root, store, store, TasteReader(settings), build_learner(settings))
     auth = build_authenticator(settings)
     speech = SpeechSynthesizer(settings.tts_voice)
-    studio = TryOnStudio(settings, ImageFetcher())
+    studio = build_try_on_studio(settings, ImageFetcher())
     tagger = WardrobeTagger(settings, catalog)
     personas = load_personas()
 
@@ -109,7 +111,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     warm_calls = [catalog.categories, catalog.product_types,
                   lambda: catalog.search(SearchQuery(text="", limit=1)),
                   lambda: speech.synthesize("Hi"),
-                  root.recommender.prepare]   # what goes with what, so adding to the cart never waits on it
+                  root.recommender.prepare,   # what goes with what, so adding to the cart never waits on it
+                  lambda: store.latest_conversation("")]   # opens the database connection before anyone visits
 
     @asynccontextmanager
     async def lifespan(_: FastAPI):
@@ -133,7 +136,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             started = await chat.start_session(shopper.id, shopper.first_name,
                                                persona.preferences if persona else None,
                                                preferred_name=body.preferred_name.strip(), fresh=body.fresh)
-            return started.model_copy(update={"categories": await asyncio.to_thread(catalog.categories)})
+            return started.model_copy(update={"categories": await asyncio.to_thread(catalog.categories),
+                                              "try_on_adjustable": studio.follows_wishes})
         except Exception:
             logger.exception("Could not start a conversation for %s", shopper.id)
             raise HTTPException(status_code=503, detail="I can't reach your saved cart and preferences "
@@ -186,10 +190,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         if len(photo) > MAX_PHOTO_BYTES:
             raise HTTPException(status_code=413, detail="That photo is too large. Please use one under 10 MB.")
         try:
-            image = await asyncio.to_thread(studio.dress, photo, body.mime_type, products, owned)
+            image = await asyncio.to_thread(studio.dress, photo, body.mime_type, products, owned, body.wish)
         except TryOnError as error:
             raise HTTPException(status_code=422, detail=str(error))
-        return Response(content=image, media_type="image/png")
+        return Response(content=image.data, media_type=image.mime_type)
 
     @app.post("/api/wardrobe")
     async def add_to_wardrobe(body: WardrobePhotoRequest, shopper: Shopper = Depends(current_shopper)) -> dict:
@@ -203,14 +207,16 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         if len(photo) > MAX_PHOTO_BYTES:
             raise HTTPException(status_code=413, detail="That photo is too large. Please use one under 10 MB.")
         try:
-            items = await asyncio.to_thread(tagger.from_photo, photo, body.mime_type, body.thumbnail or None)
+            pieces = await asyncio.to_thread(tagger.from_photo, photo, body.mime_type, body.thumbnail or None)
         except Exception:
             logger.exception("Could not read a wardrobe photo for %s", shopper.id)
-            items = []
+            pieces = []
+        items = [piece.item for piece in pieces]
         if not items:
             raise HTTPException(status_code=422, detail="I couldn't make out any clothes in that photo. "
                                                         "Could you try a clearer one?")
-        wardrobe = await chat.add_to_wardrobe(shopper.id, body.session_id, items)
+        wardrobe = await chat.add_to_wardrobe(shopper.id, body.session_id, items,
+                                              [(piece.traits, piece.made_for) for piece in pieces])
         return {"wardrobe": [i.model_dump() for i in wardrobe], "added": [i.model_dump() for i in items]}
 
     @app.delete("/api/wardrobe/{item_id}")

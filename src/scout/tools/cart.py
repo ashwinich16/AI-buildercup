@@ -60,6 +60,15 @@ class Cart(BaseModel):
     def has_unpriced(self) -> bool:
         return any(item.price is None for item in self.items)
 
+    def spoken(self) -> str:
+        """The cart in a few spoken words: each item by its kind (or a short name), size and price, then the total."""
+        def one(item: CartItem) -> str:
+            name = (item.kind or " ".join(item.name.split()[:6])) + (f", size {item.size}," if item.size else "")
+            return f"the {name} at ${item.price:.2f}" if item.price is not None else f"the {name}"
+        names = [one(item) for item in self.items]
+        listed = names[0] if len(names) == 1 else ", ".join(names[:-1]) + " and " + names[-1]
+        return f"{listed}, ${self.total:.2f} in total" if len(names) > 1 else listed
+
     def to_prompt_text(self) -> str:
         if not self.items:
             return "The cart is empty."
