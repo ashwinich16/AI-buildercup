@@ -218,6 +218,22 @@ class ScoutOrchestrator(BaseAgent):
             async for item in self._outfits.size_given(ctx, turn, pending):   # a size for the outfit's pieces
                 yield item
             return
+        if ctx.session.state.get(state_keys.CONFIRM_SIZES):            # "add the outfit in those sizes?"
+            async for item in self._outfits.sizes_confirmed(ctx, turn):
+                yield item
+            return
+        where = ctx.session.state.get(state_keys.PENDING_WHERE)
+        if where:                                                       # "in your outfit, or separately?"
+            yield self._update_state(ctx, {state_keys.PENDING_WHERE: None})
+            choice = self._outfits.where_choice(ctx, turn)
+            if choice:
+                async for item in self._outfits.where_answered(ctx, where, choice):
+                    yield item
+                return
+        if state_keys.planning_outfit(ctx.session.state) and self._outfits.asks_where(ctx, turn):
+            async for item in self._outfits.ask_where(ctx, turn):
+                yield item
+            return
         if state_keys.planning_outfit(ctx.session.state):
             turn = self._outfits.as_step(ctx, turn)
         if pending and turn.size and turn.intent in ("choose", "other") and not turn.about_suggestion \
@@ -919,6 +935,10 @@ class ScoutOrchestrator(BaseAgent):
         need = ShoppingNeed.model_validate(state.get(state_keys.NEED) or {})
         presented = len(state.get(state_keys.PRESENTED) or [])
         base = {"need": need, "ready_to_search": False, "understood": text}
+
+        if (state.get(state_keys.PENDING_WHERE) and re.search(r"outfit|look|separate|on (its|their) own", text)) \
+                or (state.get(state_keys.CONFIRM_SIZES) and re.fullmatch(r"(yes,? )?(add them|change sizes)", text)):
+            return TurnUnderstanding(intent="other", **base)            # the answer is read where it is used
 
         pending = state.get(state_keys.PENDING_SIZE)
         if pending:                                   # the answer to "what size?" (or a size button)

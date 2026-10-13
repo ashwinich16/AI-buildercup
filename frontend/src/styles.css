@@ -2079,6 +2079,46 @@ button {
 .card__try {
   grid-column: 1 / -1;
 }
+.try-on__items {
+  margin-bottom: 16px;
+  padding: 12px 14px;
+  border-radius: var(--radius);
+  background: var(--surface-2);
+}
+.try-on__items ul {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: 6px;
+}
+.try-on__items li {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  font-size: 0.92rem;
+}
+.try-on__item-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.try-on__item-price {
+  flex: none;
+  font-weight: 600;
+}
+.try-on__total {
+  display: flex;
+  justify-content: space-between;
+  margin: 10px 0 0;
+  padding-top: 8px;
+  border-top: 1px solid var(--line);
+}
+.capsule__price {
+  margin: 2px 0 0;
+  font-size: 0.86rem;
+  font-weight: 600;
+}
 .try-on__start,
 .try-on__result {
   display: grid;

@@ -18,6 +18,8 @@ from scout.domain import Product
 
 logger = logging.getLogger(__name__)
 
+JUDGE_TIMEOUT_S = 12    # usually 2-5 s; past this the search order is used for that piece instead
+
 class OccasionFit(BaseModel):
     product_id: str
     fit: Literal["good", "close", "wrong"] = "good"   # would a well-dressed friend wear it there?
@@ -34,7 +36,7 @@ What the piece should be like: {looks_like}
 PRODUCTS FOUND IN THE SHOP
 {products}
 
-Put EVERY product in order, the best for THIS occasion first: think of the setting, the weather it implies,
+Judge every product for THIS occasion: think of the setting, the weather it implies,
 what they will be doing, and how dressed up it is. Judge each one like a well-dressed friend:
 - fit "good": a sensible person would happily wear it there.
 - fit "close": it would do, but is a step off (a little less formal, a little more casual); say how in why.
@@ -44,13 +46,14 @@ what they will be doing, and how dressed up it is. Judge each one like a well-dr
 How dressed up the occasion is sets the bar: for a formal one, proper formal pieces are good, smart-casual ones
 (chinos, loafers) are close, and casual, outdoor, tactical, cargo or sporty ones are wrong.
 Judge each product on its own against the occasion, never against the others: if none of them is good, none is
-marked good. For each, give in at most eight plain words why it suits the occasion (or how it falls short), from its real
-details. Judge by the product's real details, not only its kind. Use the ids exactly as given."""
+marked good. Judge by the product's real details, not only its kind.
+List ONLY the good and close ones, best first; leave the wrong ones out entirely. For each, give in at most six plain
+words why it suits the occasion (or, for a close one, how it falls short). Use the ids exactly as given."""
 
 
 class OccasionRanker:
     def __init__(self, settings: Settings):
-        self._client = settings.genai_client()
+        self._client = settings.genai_client(timeout_s=JUDGE_TIMEOUT_S)
         self._model = settings.model_for("occasion")
         tuning = settings.tuning("occasion")
         self._config = types.GenerateContentConfig(
@@ -77,8 +80,8 @@ class OccasionRanker:
             return products, None
         by_id = {p.id: p for p in products}
         fits = list({fit.product_id: fit for fit in ranking if fit.product_id in by_id}.values())   # each once
-        if not fits:
-            return products, None
+        if not fits:                              # judged, and none of them suits it
+            return products, {}
         fits.sort(key=lambda fit: ("good", "close", "wrong").index(fit.fit))   # stable: its order within each
         ranked = [by_id[fit.product_id] for fit in fits]
         ranked += [p for p in products if p.id not in {fit.product_id for fit in fits}]   # any it skipped

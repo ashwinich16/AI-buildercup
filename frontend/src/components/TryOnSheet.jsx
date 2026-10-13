@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { api } from "../api.js";
+import { formatPrice } from "../format.js";
 import Sheet from "./Sheet.jsx";
 
 // Virtual try-on: the shopper's photo wearing the chosen product (or the whole outfit). When the try-on can
@@ -61,6 +62,7 @@ export default function TryOnSheet({ request, sessionId, photo, onPhoto, onClose
   return (
     <Sheet open={Boolean(request)} onClose={onClose} title="Try on">
       <input ref={fileRef} type="file" accept="image/jpeg,image/png" hidden onChange={choosePhoto} />
+      <TryOnItems items={request?.items || []} />
       {!photo ? (
         <div className="try-on__start">
           <p>
@@ -99,5 +101,30 @@ export default function TryOnSheet({ request, sessionId, photo, onPhoto, onClose
         </div>
       )}
     </Sheet>
+  );
+}
+
+// What is being tried on, with prices (their own pieces say so), and the total of the new ones.
+function TryOnItems({ items }) {
+  if (items.length === 0) return null;
+  const priced = items.filter((item) => item.price != null);
+  const total = priced.reduce((sum, item) => sum + item.price, 0);
+  return (
+    <div className="try-on__items">
+      <ul role="list">
+        {items.map((item, index) => (
+          <li key={`${item.name}-${index}`}>
+            <span className="try-on__item-name">{item.name}</span>
+            <span className="try-on__item-price">{item.owned ? "Yours" : formatPrice(item.price)}</span>
+          </li>
+        ))}
+      </ul>
+      {priced.length > 1 && (
+        <p className="try-on__total">
+          <span>Total</span>
+          <strong>{formatPrice(total)}</strong>
+        </p>
+      )}
+    </div>
   );
 }

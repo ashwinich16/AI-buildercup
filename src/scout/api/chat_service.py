@@ -85,6 +85,7 @@ class BoardTile(BaseModel):
     category: str                                          # what the Change / Remove buttons name
     description: str
     image_url: Optional[str] = None
+    price: Optional[float] = None                          # a new piece's price
     owned: bool = False
     missing: bool = False                                  # a new piece nothing suitable was found for
     changing: bool = False                                 # the options on screen are for this piece
@@ -254,8 +255,9 @@ class ScoutChatService:
             reply = "Sorry, I lost my train of thought. Could you say that again?"
             yield {"type": "delta", "text": reply}
         choices = turn.choices if turn and turn.question and not turn.ready_to_search else []
-        choose_one = bool(session.state.get(state_keys.PENDING_SIZE))
-        if choose_one:                                                  # waiting for a size: the sizes, to tap
+        choose_one = bool(session.state.get(state_keys.PENDING_SIZE) or session.state.get(state_keys.PENDING_WHERE)
+                          or session.state.get(state_keys.CONFIRM_SIZES))
+        if session.state.get(state_keys.PENDING_SIZE):                 # waiting for a size: the sizes, to tap
             choices = list(session.state.get(state_keys.SIZE_CHOICES) or [])
         done = ChatTurn(reply=reply, action=action, choices=choices, choose_one=choose_one,
                         **_screen_from_state(session.state).model_dump())
@@ -594,7 +596,7 @@ def _capsule_view(outfit: Optional[Outfit], wardrobe: list[WardrobeItem]) -> Opt
             elif piece.product is not None:
                 card = _small_card(piece.product)
                 tiles.append(BoardTile(category=piece.category, description=card.name, image_url=card.image_url,
-                                       changing=changing))
+                                       price=card.price, changing=changing))
             else:
                 tiles.append(BoardTile(category=piece.category, description=f"No {piece.category} found yet",
                                        missing=True, changing=changing))

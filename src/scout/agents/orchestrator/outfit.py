@@ -14,6 +14,8 @@ tools are the Orchestrator's own, so nothing is created here.
 
 import asyncio
 import logging
+import re
+import time
 from concurrent.futures import ThreadPoolExecutor
 from typing import TYPE_CHECKING, Optional
 
@@ -25,6 +27,7 @@ from scout.agents.elicitation import OutfitStep, TurnUnderstanding, read_turn
 from scout.agents.narration import NarrationTask
 from scout.domain import Change, Outfit, OutfitPlan, Piece, Product, ShoppingNeed
 from scout.domain.sizes import SizeScale, read_size, size_scale
+from scout.agents.model_io import content_text
 from scout.tools import RetrievalResult
 from scout.tools.taste_reader import describe
 
@@ -69,6 +72,82 @@ class OutfitPlanner:
             return turn
         return turn.model_copy(update={"intent": "outfit", "outfit": step})
 
+    def asks_where(self, ctx: InvocationContext, turn: TurnUnderstanding) -> bool:
+        """While planning, a kind of product the outfit does not have (jeans, when it has trousers) may be for
+        the outfit or something they want on its own: never guess, ask."""
+        outfit = state_keys.outfit(ctx.session.state)
+        if outfit is None or turn.intent != "shop" or not turn.need.category or turn.question:
+            return False
+        category = turn.need.category.lower()
+        changing = outfit.changing.category.lower() if outfit.changing else None
+        return category not in {c.lower() for c in outfit.categories()} and category != changing
+
+    async def ask_where(self, ctx: InvocationContext, turn: TurnUnderstanding):
+        outfit = state_keys.outfit(ctx.session.state)
+        need = turn.need
+        in_outfit = {c.lower(): c for c in outfit.categories()}
+        replaces = next((in_outfit[c.lower()] for c in self._scout._neighbour_categories(need)
+                         if c.lower() in in_outfit), None)
+        kind = need.product_types[0] if need.product_types else need.category
+        them = "them" if kind.endswith("s") else "it"
+        place = f", in place of the {replaces}," if replaces else ""
+        yield self._scout._update_state(ctx, {state_keys.PENDING_WHERE: {"need": need.model_dump(),
+                                                                         "replaces": replaces}})
+        async for item in self._ask(ctx, f"Should the {kind} go in your outfit{place} or are you shopping for "
+                                         f"{them} separately?", ["In my outfit", "Shop separately"]):
+            yield item
+
+    @staticmethod
+    def where_choice(ctx: InvocationContext, turn: TurnUnderstanding) -> Optional[str]:
+        """Their answer: "outfit", "separate", or None when they moved on to something else."""
+        text = content_text(ctx.user_content, separator=" ").lower()
+        if re.search(r"separate|on (its|their) own|regular|by itself|by themselves|just (the|for)|not (in|for) the (outfit|look)", text):
+            return "separate"
+        if re.search(r"\b(outfit|look|in place|swap|replace|instead)\b", text) or turn.intent == "outfit":
+            return "outfit"
+        return None
+
+    async def where_answered(self, ctx: InvocationContext, where: dict, choice: str):
+        need = ShoppingNeed.model_validate(where["need"])
+        if choice == "separate":                 # regular shopping (to the cart); the board stays on screen
+            yield self._scout._update_state(ctx, {state_keys.MODE: None, state_keys.NEED: need.model_dump()})
+            async for item in self._scout._search_and_narrate(ctx):
+                yield item
+            return
+        outfit = state_keys.outfit(ctx.session.state)
+        replaces = where.get("replaces")
+        looks = (outfit.looks_with(replaces) if replaces else []) or list(range(len(outfit.looks)))
+        outfit.changing = Change(category=need.category, looks=looks, wish=need.looking_for or "", replaces=replaces)
+        place = f", in place of the {replaces}" if replaces else ""
+        async for item in self._offer_options(ctx, outfit, f"They want {need.category} in the outfit{place}."):
+            yield item
+
+    async def sizes_confirmed(self, ctx: InvocationContext, turn: TurnUnderstanding):
+        """Their answer to "add them in those sizes?": add them, change one size they named, or ask each again."""
+        outfit = state_keys.outfit(ctx.session.state)
+        yield self._scout._update_state(ctx, {state_keys.CONFIRM_SIZES: None})
+        if outfit is None:
+            return
+        text = content_text(ctx.user_content, separator=" ").lower()
+        known = dict(ctx.session.state.get(state_keys.KNOWN_SIZES) or {})
+        scales = {s.key: s for s in map(size_scale, outfit.products_to_buy()) if s is not None}
+        said = turn.size or text
+        named = [(key, read_size(said, scale)) for key, scale in scales.items() if read_size(said, scale)]
+        if len(named) == 1 and not re.search(r"\b(yes|add them|go ahead|sure|ok|okay|fine|perfect)\b", text):
+            key, size = named[0]                 # "make the shoes a 10": that size, then check again
+            yield self._scout._update_state(ctx, {state_keys.KNOWN_SIZES: {**known, key: size}})
+            async for item in self._add_outfit_to_cart(ctx, outfit):
+                yield item
+            return
+        if re.search(r"\b(change|different|other|no)\b", text):   # ask every size again
+            yield self._scout._update_state(ctx, {state_keys.KNOWN_SIZES: {k: v for k, v in known.items()
+                                                                           if k not in scales}})
+            async for item in self._add_outfit_to_cart(ctx, outfit):
+                yield item
+            return
+        async for item in self._add_outfit_to_cart(ctx, outfit, confirmed=True):
+            yield item
+
     async def run(self, ctx: InvocationContext, turn: TurnUnderstanding):
         """Plan (or plan again), change, add or remove a piece in some looks, put the new pieces in the cart (the
         outfit is finished), leave for regular shopping, or talk about the plan."""
@@ -97,6 +176,7 @@ class OutfitPlanner:
         yield self._scout._update_state(ctx, {state_keys.STYLIST_PLAN: None})   # never reuse an older plan
         own = " from your wardrobe" if state_keys.usable_wardrobe(state) else ""
         yield self._scout._say(ctx, f"Lovely! Give me a few seconds while I plan your looks{own}.")
+        started = time.monotonic()
         try:
             events = await asyncio.wait_for(self._scout._collect(self._scout._silently(self._scout.stylist, ctx)), STYLIST_TIMEOUT_S)
         except asyncio.TimeoutError:
@@ -112,7 +192,14 @@ class OutfitPlanner:
             yield self._scout._say(ctx, "Sorry, I couldn't finish the plan just now. Shall I try again? You can also "
                                  "tell me a little more about the occasion.")
             return
+        planned = time.monotonic()
+        # Finding the pieces takes a while too: say what is planned now, so the shopper is never left in silence.
+        count = len(outfit.looks)
+        looks = "the look" if count == 1 else f"{count} looks"
+        yield self._scout._say(ctx, f"I've planned {looks}. Now I'm finding each piece in the shop.")
         await asyncio.to_thread(self._find_products, outfit, need)
+        logger.info("Outfit timing: stylist %.1fs, finding products %.1fs", planned - started,
+                    time.monotonic() - planned)
         yield self._scout._update_state(ctx, {state_keys.PRESENTED: [], state_keys.FOCUS_PRODUCT: None})   # old cards
         async for item in self._narrate_outfit(ctx, outfit, state_keys.OUTFIT_PLANNED):
             yield item
@@ -293,7 +380,8 @@ class OutfitPlanner:
         yield self._scout._update_state(ctx, {state_keys.LAST_QUESTION: question})
         yield self._scout._say(ctx, question)
 
-    async def _add_outfit_to_cart(self, ctx: InvocationContext, outfit: Outfit, follow_up: bool = False):
+    async def _add_outfit_to_cart(self, ctx: InvocationContext, outfit: Outfit, follow_up: bool = False,
+                                  confirmed: bool = False):
         """The new pieces go in the cart and the outfit is finished: back to regular shopping. The board stays,
         so they can still try the looks on. Sizes are asked here, once per kind of size."""
         products = outfit.products_to_buy()
@@ -316,6 +404,15 @@ class OutfitPlanner:
             opening = "Got it. And" if follow_up else "Lovely! Before I add the outfit to your cart:"
             yield self._scout._say(ctx, f"{opening} what size would you like for the {names}? "
                                  f"They come in {missing.spoken}.")
+            return
+        sized = [(p, size_scale(p)) for p in new if size_scale(p) is not None]
+        if sized and not confirmed:                      # read every size back once before adding
+            kinds = list(dict.fromkeys(f"the {p.kind or 'item'} in {scale.label(known[scale.key])}" for p, scale in sized))
+            summary = ", ".join(kinds[:-1]) + f" and {kinds[-1]}" if len(kinds) > 1 else kinds[0]
+            yield self._scout._update_state(ctx, {state_keys.CONFIRM_SIZES: True})
+            async for item in self._ask(ctx, f"Before I add them: {summary}. Shall I add them in those sizes, or "
+                                             f"would you like to change a size?", ["Add them", "Change sizes"]):
+                yield item
             return
         added = []
         for product in products:

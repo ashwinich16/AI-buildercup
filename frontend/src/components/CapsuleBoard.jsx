@@ -40,7 +40,14 @@ export default function CapsuleBoard({ capsule, busy, onAsk, onTryOn, onOpenWard
                   <button
                     className="button button--ghost button--small"
                     onClick={() =>
-                      onTryOn({ productIds: look.product_ids, wardrobeIds: look.wardrobe_ids, label: `${look.title} look` })
+                      onTryOn({
+                        productIds: look.product_ids,
+                        wardrobeIds: look.wardrobe_ids,
+                        label: `${look.title} look`,
+                        items: look.tiles
+                          .filter((tile) => !tile.missing)
+                          .map((tile) => ({ name: tile.description, price: tile.owned ? null : tile.price, owned: tile.owned })),
+                      })
                     }
                   >
                     Try this look on
@@ -67,6 +74,7 @@ export default function CapsuleBoard({ capsule, busy, onAsk, onTryOn, onOpenWard
                       {tile.changing ? "Changing" : tile.owned ? "Yours" : tile.missing ? "Not found" : "New"}
                     </p>
                     <p className="capsule__name muted">{tile.description}</p>
+                    {tile.price != null && <p className="capsule__price">{formatPrice(tile.price)}</p>}
                     <div className="capsule__tile-actions">
                       <button
                         className="link-button"
