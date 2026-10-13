@@ -16,6 +16,7 @@ Text-to-Speech speaks, and short chimes signal whose turn it is.
 
 ## Repository layout
 
+
 ```
 AI-buildercup/
 ├── src/scout/
