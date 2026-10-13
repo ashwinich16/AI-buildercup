@@ -6,6 +6,8 @@
 
 let credentials = null;
 
+const SESSION_TIMEOUT_MS = 25000; // opening a conversation normally takes a second or two
+
 export function setCredentials(newCredentials) {
   credentials = newCredentials;
 }
@@ -18,15 +20,27 @@ export const firebaseCredentials = (firebaseUser) => ({
   headers: async () => ({ Authorization: `Bearer ${await firebaseUser.getIdToken()}` }),
 });
 
-async function request(path, { method = "GET", body } = {}) {
-  const response = await fetch(path, {
-    method,
-    headers: {
-      "Content-Type": "application/json",
-      ...(credentials ? await credentials.headers() : {}),
-    },
-    body: body ? JSON.stringify(body) : undefined,
-  });
+// `timeoutMs`: give up after this long with a clear message, instead of waiting forever.
+async function request(path, { method = "GET", body, timeoutMs } = {}) {
+  const controller = new AbortController();
+  const timer = timeoutMs ? setTimeout(() => controller.abort(), timeoutMs) : null;
+  let response;
+  try {
+    response = await fetch(path, {
+      method,
+      headers: {
+        "Content-Type": "application/json",
+        ...(credentials ? await credentials.headers() : {}),
+      },
+      body: body ? JSON.stringify(body) : undefined,
+      signal: controller.signal,
+    });
+  } catch (error) {
+    if (error.name === "AbortError") throw new Error("Scout is taking too long to answer. Please try again.");
+    throw error;
+  } finally {
+    clearTimeout(timer);
+  }
   if (!response.ok) {
     let detail = response.statusText;
     try {
@@ -43,7 +57,13 @@ export const api = {
   authConfig: async () => (await request("/api/auth-config")).json(),
   // Carries on the shopper's last conversation (returns its `history`), unless `fresh` asks for a new one.
   startSession: async (preferredName = "", fresh = false) =>
-    (await request("/api/sessions", { method: "POST", body: { preferred_name: preferredName, fresh } })).json(),
+    (
+      await request("/api/sessions", {
+        method: "POST",
+        body: { preferred_name: preferredName, fresh },
+        timeoutMs: SESSION_TIMEOUT_MS,
+      })
+    ).json(),
   endSession: async (sessionId) =>
     (await request(`/api/sessions/${encodeURIComponent(sessionId)}`, { method: "DELETE" })).json(),
   // Scout's reply as it is written: onEvent gets {type: "delta" | "screen" | "done"} items.
@@ -73,16 +93,17 @@ export const api = {
   },
   // The shopper's photo ({ data: base64, mimeType }) wearing the products: resolves with a PNG blob.
   // `request`: { productIds, wardrobeIds } — products from the shop, and pieces they own (for a planned look).
-  tryOn: async (sessionId, request, photo) =>
+  tryOn: async (sessionId, what, photo, wish = "") =>
     (
       await request("/api/try-on", {
         method: "POST",
         body: {
           session_id: sessionId,
-          product_ids: request.productIds || [],
-          wardrobe_ids: request.wardrobeIds || [],
+          product_ids: what.productIds || [],
+          wardrobe_ids: what.wardrobeIds || [],
           photo: photo.data,
           mime_type: photo.mimeType,
+          wish,
         },
       })
     ).blob(),

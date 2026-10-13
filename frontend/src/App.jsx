@@ -15,19 +15,21 @@ import CapsuleBoard from "./components/CapsuleBoard.jsx";
 import WardrobeSheet from "./components/WardrobeSheet.jsx";
 import TryOnSheet from "./components/TryOnSheet.jsx";
 import CartSheet from "./components/CartSheet.jsx";
+import WishlistSheet from "./components/WishlistSheet.jsx";
 import SettingsSheet from "./components/SettingsSheet.jsx";
 
 const EMPTY_SCREEN = {
-  products: [], cart: { items: [], total: 0 }, focus_product_id: null, suggestion: null, capsule: null,
+  products: [], cart: { items: [], total: 0 }, wishlist: { items: [] }, focus_product_id: null, suggestion: null, capsule: null,
   planning_outfit: false, wardrobe: [], suggestions: [], spotlight: null,
 };
 // What to show, from any API response that carries it (session start, streamed screen, end of turn).
 // The wardrobe is left out of mid-turn updates (it carries photos), so the last one shown is kept then.
 const suggestionsKeyOf = (suggestions) => (suggestions || []).map((item) => item.id).join(",");
 const screenOf = (
-  { products, cart, focus_product_id, suggestion, suggestions, capsule, planning_outfit, wardrobe, spotlight }, current = EMPTY_SCREEN,
+  { products, cart, wishlist, focus_product_id, suggestion, suggestions, capsule, planning_outfit, wardrobe, spotlight },
+  current = EMPTY_SCREEN,
 ) => ({
-  products, cart, focus_product_id, suggestion, capsule, planning_outfit, wardrobe: wardrobe ?? current.wardrobe,
+  products, cart, wishlist: wishlist ?? current.wishlist, focus_product_id, suggestion, capsule, planning_outfit, wardrobe: wardrobe ?? current.wardrobe,
   suggestions: suggestions || [], spotlight,
 });
 const DEFAULT_SETTINGS = {
@@ -59,10 +61,11 @@ export default function App() {
   const [paused, setPaused] = useState(false);
   const [settings, setSettings] = useState(DEFAULT_SETTINGS);
   const [announcement, setAnnouncement] = useState("");
-  const [openSheet, setOpenSheet] = useState(null); // "cart", "wardrobe", "settings" or null
+  const [openSheet, setOpenSheet] = useState(null); // "cart", "wishlist", "wardrobe", "settings" or null
   const [spokenOption, setSpokenOption] = useState(null); // position of the option Scout is describing right now
   const [assistantWidth, setAssistantWidth] = useState(DEFAULT_ASSISTANT_WIDTH); // the Scout panel, in pixels
   const [categories, setCategories] = useState([]); // what the shop sells, offered as first things to ask for
+  const [tryOnAdjustable, setTryOnAdjustable] = useState(false); // the try-on follows "tuck the shirt in"
   const [tryOn, setTryOn] = useState(null); // what to try on: { productIds, wardrobeIds, label }, or null
   const [photo, setPhoto] = useState(null); // the shopper's photo for try-on, kept only while the page is open
   const [attachments, setAttachments] = useState([]); // clothes photos attached in the chat: { id, preview, status, note }
@@ -264,6 +267,7 @@ export default function App() {
       setScreen(screenOf(started));
       setDismissedSuggestions(suggestionsKeyOf(started.suggestions)); // pop up only after adding, not on resume
       setCategories(started.categories || []);
+      setTryOnAdjustable(Boolean(started.try_on_adjustable));
       // Carrying on their last conversation: what was said is shown again, as they left it.
       setMessages((started.history || []).map((m) => message(m.role, m.text)));
       setResumedChat(Boolean(started.resumed));
@@ -276,7 +280,7 @@ export default function App() {
         scoutSays(started.greeting);
       }
     } catch (error) {
-      scoutSays(`I couldn't start our conversation: ${error.message}`);
+      scoutSays(`I couldn't start our conversation: ${error.message} Refreshing the page tries again.`);
     }
   };
 
@@ -360,6 +364,8 @@ export default function App() {
         shopper={shopper}
         cartCount={screen.cart.items?.length || 0}
         onOpenCart={() => setOpenSheet("cart")}
+        wishlistCount={screen.wishlist?.items?.length || 0}
+        onOpenWishlist={() => setOpenSheet("wishlist")}
         onOpenWardrobe={() => setOpenSheet("wardrobe")}
         onClearChat={clearConversation}
         onOpenSettings={() => setOpenSheet("settings")}
@@ -397,7 +403,8 @@ export default function App() {
               focusId={screen.focus_product_id}
               spokenPosition={spokenOption}
               busy={busy || !sessionId}
-              choosingFor={screen.capsule?.new_pieces.find((piece) => piece.current)?.category}
+              choosingFor={screen.capsule?.changing}
+              savedIds={(screen.wishlist?.items || []).map((item) => item.product_id)}
               onAsk={send}
               onTryOn={setTryOn}
             />
@@ -457,6 +464,13 @@ export default function App() {
         busy={busy}
         onAsk={send}
       />
+      <WishlistSheet
+        open={openSheet === "wishlist"}
+        onClose={() => setOpenSheet(null)}
+        wishlist={screen.wishlist}
+        busy={busy}
+        onAsk={send}
+      />
       <WardrobeSheet
         open={openSheet === "wardrobe"}
         onClose={() => setOpenSheet(null)}
@@ -465,6 +479,7 @@ export default function App() {
         onWardrobe={(wardrobe) => setScreen((current) => ({ ...current, wardrobe }))}
       />
       <TryOnSheet
+        adjustable={tryOnAdjustable}
         request={tryOn}
         sessionId={sessionId}
         photo={photo}

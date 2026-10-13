@@ -1,11 +1,11 @@
 import { formatPrice } from "../format.js";
 
-// The outfit plan as a board: one row per look (day or occasion), the shopper's own pieces next to the few
-// new ones, each look ready to try on; then the new pieces to buy. Scout says it out loud too; the buttons are one-press shortcuts
-// that go through the conversation like anything the shopper says.
+// The outfit as a board: one row per look, each with its own pieces (the shopper's own and new ones), each
+// look ready to try on. Every piece can be changed or removed in its own look. Scout says it out loud too;
+// the buttons are one-press shortcuts that go through the conversation like anything the shopper says.
 export default function CapsuleBoard({ capsule, busy, onAsk, onTryOn, onOpenWardrobe }) {
   if (!capsule) return null;
-  const found = capsule.new_pieces.filter((piece) => piece.product);
+  const toBuy = capsule.to_buy.length;
   const ownedCount = capsule.looks.flatMap((look) => look.tiles).filter((tile) => tile.owned).length;
 
   return (
@@ -30,86 +30,77 @@ export default function CapsuleBoard({ capsule, busy, onAsk, onTryOn, onOpenWard
       )}
 
       <ol className="capsule__looks" role="list">
-        {capsule.looks.map((look, index) => (
-          <li key={`${look.title}-${index}`} className="capsule__look">
-            <div className="capsule__look-head">
-              <h3 className="capsule__look-title">{look.title}</h3>
-              {look.product_ids.length + look.wardrobe_ids.length > 0 && (
-                <button
-                  className="button button--ghost button--small"
-                  onClick={() =>
-                    onTryOn({ productIds: look.product_ids, wardrobeIds: look.wardrobe_ids, label: `${look.title} look` })
-                  }
-                >
-                  Try this look on
-                </button>
-              )}
-            </div>
-            <ul className="capsule__tiles" role="list">
-              {look.tiles.map((tile, tileIndex) => (
-                <li
-                  key={tileIndex}
-                  className={`capsule__tile ${tile.owned ? "is-owned" : "is-new"} ${tile.pending ? "is-pending" : ""} ${tile.current ? "is-current" : ""}`}
-                >
-                  <div className="capsule__image">
-                    {tile.image_url ? <img src={tile.image_url} alt="" loading="lazy" /> : null}
-                  </div>
-                  <p className="capsule__badge">
-                    {tile.owned ? "Yours" : tile.current ? "Choosing now" : tile.pending ? "To choose" : "New"}
-                  </p>
-                  <p className="capsule__name muted">{tile.description}</p>
-                </li>
-              ))}
-            </ul>
-            {look.why && <p className="capsule__why muted">{look.why}</p>}
-          </li>
-        ))}
+        {capsule.looks.map((look, index) => {
+          const number = index + 1;
+          return (
+            <li key={`${look.title}-${index}`} className="capsule__look">
+              <div className="capsule__look-head">
+                <h3 className="capsule__look-title">{look.title}</h3>
+                {look.product_ids.length + look.wardrobe_ids.length > 0 && (
+                  <button
+                    className="button button--ghost button--small"
+                    onClick={() =>
+                      onTryOn({ productIds: look.product_ids, wardrobeIds: look.wardrobe_ids, label: `${look.title} look` })
+                    }
+                  >
+                    Try this look on
+                  </button>
+                )}
+              </div>
+              <ul className="capsule__tiles" role="list">
+                {look.tiles.map((tile, tileIndex) => (
+                  <li
+                    key={tileIndex}
+                    className={`capsule__tile ${tile.owned ? "is-owned" : "is-new"} ${tile.missing ? "is-pending" : ""} ${tile.changing ? "is-current" : ""}`}
+                  >
+                    <div className="capsule__image">
+                      {tile.image_url ? (
+                        <img src={tile.image_url} alt="" loading="lazy" />
+                      ) : (
+                        <span className="capsule__placeholder muted">
+                          {tile.category}
+                          {tile.owned && <small>No photo</small>}
+                        </span>
+                      )}
+                    </div>
+                    <p className="capsule__badge">
+                      {tile.changing ? "Changing" : tile.owned ? "Yours" : tile.missing ? "Not found" : "New"}
+                    </p>
+                    <p className="capsule__name muted">{tile.description}</p>
+                    <div className="capsule__tile-actions">
+                      <button
+                        className="link-button"
+                        disabled={busy}
+                        aria-label={`Change the ${tile.category} in look ${number}`}
+                        onClick={() => onAsk(`Change the ${tile.category} in look ${number}`)}
+                      >
+                        Change
+                      </button>
+                      <button
+                        className="link-button"
+                        disabled={busy}
+                        aria-label={`Remove the ${tile.category} from look ${number}`}
+                        onClick={() => onAsk(`Remove the ${tile.category} from look ${number}`)}
+                      >
+                        Remove
+                      </button>
+                    </div>
+                  </li>
+                ))}
+              </ul>
+              {look.why && <p className="capsule__why muted">{look.why}</p>}
+            </li>
+          );
+        })}
       </ol>
-
-      {capsule.new_pieces.length > 0 && (
-        <div className="capsule__buy">
-          <h3 className="capsule__look-title">New pieces to buy</h3>
-          <ul className="capsule__new" role="list">
-            {capsule.new_pieces.map((piece) => (
-              <li key={piece.key} className="capsule__new-piece">
-                <p className="capsule__kind">
-                  {piece.category}{" "}
-                  <span className="muted">
-                    · in {piece.looks} {piece.looks === 1 ? "look" : "looks"}
-                  </span>
-                </p>
-                <p className="capsule__name">{pieceStatus(piece, capsule.guided)}</p>
-                {!piece.current && !piece.skipped && (piece.product || !capsule.guided) && (
-                  <button
-                    className="button button--ghost button--small"
-                    disabled={busy}
-                    onClick={() => onAsk(`Show me a different ${piece.category} for the plan`)}
-                  >
-                    {capsule.guided ? "Change" : "Swap"}
-                  </button>
-                )}
-                {piece.current && (
-                  <button
-                    className="button button--ghost button--small"
-                    disabled={busy}
-                    onClick={() => onAsk(`Skip the ${piece.category}`)}
-                  >
-                    Skip
-                  </button>
-                )}
-              </li>
-            ))}
-          </ul>
-        </div>
-      )}
 
       <div className="capsule__actions">
         <button
           className="button"
-          disabled={busy || found.length === 0}
+          disabled={busy || toBuy === 0}
           onClick={() => onAsk("Add the new pieces from the plan to my cart")}
         >
-          Add {found.length} new {found.length === 1 ? "piece" : "pieces"} to cart
+          Add {toBuy} new {toBuy === 1 ? "piece" : "pieces"} to cart
         </button>
         <button className="button button--ghost" disabled={busy} onClick={() => onAsk("Let's leave the plan and just shop")}>
           Back to regular shopping
@@ -117,11 +108,4 @@ export default function CapsuleBoard({ capsule, busy, onAsk, onTryOn, onOpenWard
       </div>
     </section>
   );
-}
-
-function pieceStatus(piece, guided) {
-  if (piece.product) return `${piece.product.name} · ${formatPrice(piece.product.price)}`;
-  if (piece.skipped) return "Skipped";
-  if (piece.current) return "Choosing now: pick one of the options below";
-  return guided ? "Still to choose" : "Nothing suitable in the shop yet";
 }

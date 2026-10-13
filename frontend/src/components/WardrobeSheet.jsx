@@ -57,7 +57,16 @@ export default function WardrobeSheet({ open, onClose, sessionId, wardrobe, onWa
           <ul className="wardrobe__items" role="list">
             {wardrobe.map((item) => (
               <li key={item.id} className="wardrobe__item">
-                <div className="capsule__image">{item.thumbnail ? <img src={item.thumbnail} alt="" /> : null}</div>
+                <div className="capsule__image">
+                  {item.thumbnail ? (
+                    <img src={item.thumbnail} alt="" />
+                  ) : (
+                    <span className="capsule__placeholder muted">
+                      {item.category}
+                      <small>No photo</small>
+                    </span>
+                  )}
+                </div>
                 <p className="capsule__name">{item.description}</p>
                 <button
                   className="button button--ghost button--small"

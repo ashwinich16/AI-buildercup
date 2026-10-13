@@ -2,6 +2,7 @@
 // them carries the meaning for screen readers.
 const paths = {
   bag: "M6 7h12l1 13H5L6 7Zm3 0a3 3 0 0 1 6 0",
+  heart: "M12 20s-7-4.5-7-10a4 4 0 0 1 7-2.6A4 4 0 0 1 19 10c0 5.5-7 10-7 10Z",
   reset: "M4 12a8 8 0 1 0 2.5-5.8M4 4v4h4",
   camera: "M4 8h3l2-3h6l2 3h3v11H4V8Zm8 3a3 3 0 1 0 0 6 3 3 0 0 0 0-6",
   hanger: "M12 8a2 2 0 1 1 2-2M12 8v1L3 16h18l-9-7",

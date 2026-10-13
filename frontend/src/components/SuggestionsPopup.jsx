@@ -71,6 +71,14 @@ export default function SuggestionsPopup({ suggestions, open, onClose, busy, onA
                 >
                   Add
                 </button>
+                <button
+                  className="button button--ghost"
+                  disabled={busy}
+                  onClick={() => act(`Save suggestion ${index + 1} to my wishlist`)}
+                  aria-label={`Save ${item.name} to your wishlist`}
+                >
+                  Save
+                </button>
               </div>
             </li>
           );

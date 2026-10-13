@@ -11,8 +11,9 @@ const QUICK_ACTIONS = [
   "Describe the first one",
 ];
 
-// `choosingFor`: while an outfit is put together piece by piece, the piece these options are for.
-export default function ProductList({ products, focusId, spokenPosition, busy, choosingFor, onAsk, onTryOn }) {
+// `choosingFor`: while a piece of an outfit is being changed, what these options are for ("shoe for look 1").
+// `savedIds`: products already on the wishlist (their Save button says so).
+export default function ProductList({ products, focusId, spokenPosition, busy, choosingFor, savedIds = [], onAsk, onTryOn }) {
   // Keep the option Scout is talking about in view: the one being described right now, else the focus.
   const spokenId = products.find((p) => p.position === spokenPosition)?.id;
   const inView = spokenId || focusId;
@@ -43,6 +44,7 @@ export default function ProductList({ products, focusId, spokenPosition, busy, c
               speaking={product.id === spokenId}
               busy={busy}
               choosing={Boolean(choosingFor)}
+              saved={savedIds.includes(product.id)}
               onAsk={onAsk}
               onTryOn={onTryOn}
             />
@@ -68,7 +70,7 @@ export default function ProductList({ products, focusId, spokenPosition, busy, c
   );
 }
 
-function ProductCard({ product, focused, speaking, busy, choosing, onAsk, onTryOn }) {
+function ProductCard({ product, focused, speaking, busy, choosing, saved, onAsk, onTryOn }) {
   const position = ORDINALS[product.position - 1] || `Option ${product.position}`;
   const describe = () => onAsk(`Describe option ${product.position} in detail`);
   // The strongest quote, plus a heads-up if reviewers flag one: enough to judge at a glance and keep
@@ -166,6 +168,14 @@ function ProductCard({ product, focused, speaking, busy, choosing, onAsk, onTryO
             onClick={() => onTryOn({ productIds: [product.id], label: product.name })}
           >
             Try it on
+          </button>
+          <button
+            className="button button--ghost"
+            disabled={busy || saved}
+            aria-pressed={saved}
+            onClick={() => onAsk(`Save option ${product.position} to my wishlist`)}
+          >
+            {saved ? "Saved" : "Save"}
           </button>
         </div>
       </div>
