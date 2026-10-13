@@ -36,7 +36,8 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-STYLIST_TIMEOUT_S = 25    # a plan normally takes a few seconds; room for one retry if Gemini is busy
+STYLIST_TIMEOUT_S = 45    # a plan takes 6-20 s; waiting longer beats throwing a slow plan away
+STYLIST_ATTEMPTS = 2      # a plan that fails is tried once more before Scout apologises
 
 
 class OutfitPlanner:
@@ -177,18 +178,28 @@ class OutfitPlanner:
         own = " from your wardrobe" if state_keys.usable_wardrobe(state) else ""
         yield self._scout._say(ctx, f"Lovely! Give me a few seconds while I plan your looks{own}.")
         started = time.monotonic()
-        try:
-            events = await asyncio.wait_for(self._scout._collect(self._scout._silently(self._scout.stylist, ctx)), STYLIST_TIMEOUT_S)
-        except asyncio.TimeoutError:
-            logger.warning("The Stylist took longer than %ss", STYLIST_TIMEOUT_S)
-            events = []
-        for event in events:
-            yield event
+        for attempt in range(1, STYLIST_ATTEMPTS + 1):
+            try:
+                events = await asyncio.wait_for(self._scout._collect(self._scout._silently(self._scout.stylist, ctx)),
+                                                STYLIST_TIMEOUT_S)
+            except asyncio.TimeoutError:
+                logger.warning("The Stylist took longer than %ss (attempt %d)", STYLIST_TIMEOUT_S, attempt)
+                events = []
+            except Exception:                    # a failed call: try again rather than give up at once
+                logger.exception("The Stylist failed (attempt %d)", attempt)
+                events = []
+            for event in events:
+                yield event
+            raw = state.get(state_keys.STYLIST_PLAN)
+            if raw and OutfitPlan.model_validate(raw).looks:
+                break
         raw = state.get(state_keys.STYLIST_PLAN)
         plan = OutfitPlan.model_validate(raw) if raw else None
         need = state_keys.need(state)
         outfit = Outfit.from_plan(plan, state_keys.usable_wardrobe(state), need.budget_max) if plan else None
         if outfit is None or not outfit.looks:
+            logger.warning("No outfit plan: %s", "the Stylist gave none" if plan is None else
+                           f"{len(plan.looks)} looks planned, none usable")
             yield self._scout._say(ctx, "Sorry, I couldn't finish the plan just now. Shall I try again? You can also "
                                  "tell me a little more about the occasion.")
             return
