@@ -403,29 +403,40 @@ class ScoutOrchestrator(BaseAgent):
         searched too: a blouse or a shirt may suit the occasion where that exact kind does not."""
         ranked, notes = self.occasion_ranker.rank(occasion, kind, looks_like, products)
         if notes is not None and len(notes) < PRODUCTS_TO_PRESENT and need.category:
-            # Worn in the same place, filed apart: a collared shirt may be a "shirt" or a "top".
-            categories = [need.category, *self._neighbour_categories(need)]
-            taken = exclude | {p.id for p in products}
-            wider = []
-            for category in categories:
-                found = self.retriever.find(need.model_copy(update={"category": category, "product_types": [],
-                                                                    "looking_for": ""}), taken).products
-                wider += found
-                taken |= {p.id for p in found}
+            wider = self.wider_candidates(need, exclude | {p.id for p in products})
             if wider:
-                logger.info("Only %d of %d suit %r; widened to %s", len(notes), len(products), occasion, categories)
+                logger.info("Only %d of %d suit %r; widened", len(notes), len(products), occasion)
                 wider_ranked, wider_notes = self.occasion_ranker.rank(occasion, kind, looks_like, [*products, *wider])
                 if wider_notes is not None:          # could not judge the wider set: keep the first judgement
-                    # From the other category only real fits (a dress shirt for an office "top"), never a near
-                    # miss (jeans when formal trousers run out).
-                    own = (need.category or "").lower()
-                    ranked = wider_ranked
-                    notes = {pid: why for pid, why in wider_notes.items()
-                             if not (why.startswith("a close match") and
-                                     next((p.category or "" for p in ranked if p.id == pid), own).lower() != own)}
-        names: set[str] = set()                    # the same product listed twice is one option, not two
-        ranked = [p for p in ranked if not (same_listing_key(p) in names or names.add(same_listing_key(p)))]
-        return ranked, notes
+                    ranked, notes = wider_ranked, self.own_close_only(need, wider_ranked, wider_notes)
+        return self.one_per_listing(ranked), notes
+
+    def wider_candidates(self, need: ShoppingNeed, exclude: set[str]) -> list[Product]:
+        """More of what this piece could be: its whole category and the ones the shop files the same kind of
+        thing under (a collared shirt may be a "shirt" or a "top"), never one already found."""
+        categories = [need.category, *self._neighbour_categories(need)]
+        taken, wider = set(exclude), []
+        for category in categories:
+            found = self.retriever.find(need.model_copy(update={"category": category, "product_types": [],
+                                                                "looking_for": ""}), taken).products
+            wider += found
+            taken |= {p.id for p in found}
+        return wider
+
+    @staticmethod
+    def own_close_only(need: ShoppingNeed, ranked: list[Product], notes: dict) -> dict:
+        """From another category only real fits (a dress shirt for an office "top"), never a near miss (jeans
+        when formal trousers run out)."""
+        own = (need.category or "").lower()
+        category = {p.id: (p.category or "").lower() for p in ranked}
+        return {pid: why for pid, why in notes.items()
+                if not (why.startswith("a close match") and category.get(pid, own) != own)}
+
+    @staticmethod
+    def one_per_listing(products: list[Product]) -> list[Product]:
+        """The same product listed twice is one option, not two."""
+        names: set[str] = set()
+        return [p for p in products if not (same_listing_key(p) in names or names.add(same_listing_key(p)))]
 
     async def _more_options(self, ctx: InvocationContext, keep_positions: list[int]):
         """Options they have not heard yet. Only ones that still fit the need: if this message tightened it

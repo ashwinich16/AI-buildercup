@@ -30,13 +30,31 @@ class _Ranking(BaseModel):
     ranked: list[OccasionFit] = Field(default_factory=list)
 
 
+class PieceFit(OccasionFit):
+    piece: int = Field(description="The number of the piece the product was listed under")
+
+
+class _ManyRanking(BaseModel):
+    ranked: list[PieceFit] = Field(default_factory=list)
+
+
 RANK_PROMPT = """You are a stylist choosing a {piece} for this occasion: {occasion}
 What the piece should be like: {looks_like}
 
 PRODUCTS FOUND IN THE SHOP
 {products}
 
-Judge every product for THIS occasion: think of the setting, the weather it implies,
+{criteria}"""
+
+MANY_PROMPT = """You are a stylist choosing every piece of an outfit for this occasion: {occasion}
+Each piece below has its own products found in the shop. Judge each piece's products only for that piece.
+
+{pieces}
+
+{criteria}
+Give piece as the number of the piece the product was listed under."""
+
+CRITERIA = """Judge every product for THIS occasion: think of the setting, the weather it implies,
 what they will be doing, and how dressed up it is. Judge each one like a well-dressed friend:
 - fit "good": a sensible person would happily wear it there.
 - fit "close": it would do, but is a step off (a little less formal, a little more casual); say how in why.
@@ -62,6 +80,7 @@ class OccasionRanker:
             response_schema=_Ranking,
             thinking_config=types.ThinkingConfig(thinking_budget=tuning.thinking_budget),
         )
+        self._many_config = self._config.model_copy(update={"response_schema": _ManyRanking})
 
     def rank(self, occasion: str, piece: str, looks_like: str,
              products: list[Product]) -> tuple[list[Product], Optional[dict[str, str]]]:
@@ -71,23 +90,51 @@ class OccasionRanker:
         if not occasion or len(products) < 2:
             return products, {}
         listed = "\n".join(f"[{p.id}] {_describe(p)}" for p in products)
-        prompt = RANK_PROMPT.format(piece=piece, occasion=occasion, looks_like=looks_like or piece, products=listed)
+        prompt = RANK_PROMPT.format(piece=piece, occasion=occasion, looks_like=looks_like or piece, products=listed,
+                                    criteria=CRITERIA)
         try:
             response = self._client.models.generate_content(model=self._model, contents=prompt, config=self._config)
             ranking = _Ranking.model_validate(json.loads(response.text)).ranked
         except Exception as error:   # the search order is still a reasonable answer
             logger.warning("Could not rank %s for the occasion: %s", piece, error)
             return products, None
-        by_id = {p.id: p for p in products}
-        fits = list({fit.product_id: fit for fit in ranking if fit.product_id in by_id}.values())   # each once
-        if not fits:                              # judged, and none of them suits it
-            return products, {}
-        fits.sort(key=lambda fit: ("good", "close", "wrong").index(fit.fit))   # stable: its order within each
-        ranked = [by_id[fit.product_id] for fit in fits]
-        ranked += [p for p in products if p.id not in {fit.product_id for fit in fits}]   # any it skipped
-        # Good ones, and close ones said honestly ("a step less formal"); wrong ones are never noted.
-        return ranked, {fit.product_id: (fit.why if fit.fit == "good" else f"a close match: {fit.why}")
-                        for fit in fits if fit.fit != "wrong"}
+        return _ordered(products, ranking)
+
+    def rank_many(self, occasion: str, pieces: list[tuple[str, str, list[Product]]]
+                  ) -> list[tuple[list[Product], Optional[dict[str, str]]]]:
+        """`rank` for several pieces at once — (piece, what it should be like, products) each — in ONE call, so
+        planning an outfit asks Gemini once instead of once per piece (fewer calls: less waiting, fewer refusals
+        when Gemini is busy). Same answer per piece as `rank`; all None when it could not judge."""
+        if not occasion or not pieces:
+            return [(products, {}) for _, _, products in pieces]
+        blocks = []
+        for n, (piece, looks_like, products) in enumerate(pieces, start=1):
+            listed = "\n".join(f"[{p.id}] {_describe(p)}" for p in products) or "(none found)"
+            blocks.append(f"PIECE {n}: a {piece} — {looks_like or piece}\n{listed}")
+        prompt = MANY_PROMPT.format(occasion=occasion, pieces="\n\n".join(blocks), criteria=CRITERIA)
+        try:
+            response = self._client.models.generate_content(model=self._model, contents=prompt,
+                                                            config=self._many_config)
+            ranking = _ManyRanking.model_validate(json.loads(response.text)).ranked
+        except Exception as error:   # the search order is still a reasonable answer
+            logger.warning("Could not rank the outfit's pieces for the occasion: %s", error)
+            return [(products, None) for _, _, products in pieces]
+        return [_ordered(products, [fit for fit in ranking if fit.piece == n])
+                for n, (_, _, products) in enumerate(pieces, start=1)]
+
+
+def _ordered(products: list[Product], ranking: list[OccasionFit]) -> tuple[list[Product], dict[str, str]]:
+    """The products in the judge's order (good, then close, then the rest), and why each that suits it does."""
+    by_id = {p.id: p for p in products}
+    fits = list({fit.product_id: fit for fit in ranking if fit.product_id in by_id}.values())   # each once
+    if not fits:                              # judged, and none of them suits it
+        return products, {}
+    fits.sort(key=lambda fit: ("good", "close", "wrong").index(fit.fit))   # stable: its order within each
+    ranked = [by_id[fit.product_id] for fit in fits]
+    ranked += [p for p in products if p.id not in {fit.product_id for fit in fits}]   # any it skipped
+    # Good ones, and close ones said honestly ("a step less formal"); wrong ones are never noted.
+    return ranked, {fit.product_id: (fit.why if fit.fit == "good" else f"a close match: {fit.why}")
+                    for fit in fits if fit.fit != "wrong"}
 
 
 def _describe(product: Product) -> str:

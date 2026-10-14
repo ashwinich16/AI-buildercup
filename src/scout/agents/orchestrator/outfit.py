@@ -224,16 +224,15 @@ class OutfitPlanner:
             return
         share = round(outfit.budget / len(pieces), 2) if outfit.budget is not None else None
 
-        def ranked(piece: Piece) -> tuple[ShoppingNeed, list[Product]]:
-            piece_need = outfit.need_for_piece(piece, need, share)
-            found = self._for_occasion(outfit, piece_need, self._search_piece(piece_need, set()).products, set())
-            return piece_need, sorted(found, key=lambda p: not self._scout.retriever.fits(piece_need, p))   # stable
-
-        with ThreadPoolExecutor(max_workers=min(len(pieces), 6)) as pool:
-            results = list(pool.map(ranked, pieces))
+        needs = [outfit.need_for_piece(piece, need, share) for piece in pieces]
+        with ThreadPoolExecutor(max_workers=min(len(pieces), 6)) as pool:     # searching is quick: all at once
+            found = list(pool.map(lambda n: self._search_piece(n, set()).products, needs))
+        judged = self._judge_pieces(outfit, needs, found)
         used: set[str] = set()
-        for piece, (_, found) in zip(pieces, results):
-            piece.product = next((p for p in found if p.id not in used), found[0] if found else None)
+        for piece, piece_need, (ranked, notes) in zip(pieces, needs, judged):
+            suitable = ranked if notes is None else [p for p in ranked if p.id in notes]
+            suitable = sorted(suitable, key=lambda p: not self._scout.retriever.fits(piece_need, p))   # stable
+            piece.product = next((p for p in suitable if p.id not in used), suitable[0] if suitable else None)
             if piece.product is not None:
                 used.add(piece.product.id)
 
@@ -343,6 +342,32 @@ class OutfitPlanner:
         event = f"They chose {' '.join(product.title.split()[:8])} for the {change.category} in {change.looks_text()}."
         async for item in self._narrate_outfit(ctx, outfit, event):
             yield item
+
+    def _judge_pieces(self, outfit: Outfit, needs: list[ShoppingNeed], found: list[list[Product]]
+                      ) -> list[tuple[list[Product], Optional[dict]]]:
+        """Every piece judged for the occasion in ONE Gemini call (not one per piece); pieces with too few that
+        suit it are searched wider and judged again, together, in one more call."""
+        ranker = self._scout.occasion_ranker
+        if ranker is None:
+            return [(products, None) for products in found]
+        started = time.monotonic()
+        judged = ranker.rank_many(outfit.occasion, [(n.category or "item", n.looking_for, products)
+                                                    for n, products in zip(needs, found)])
+        few = [i for i, (_, notes) in enumerate(judged)
+               if notes is not None and len(notes) < self._options_shown and needs[i].category]
+        if few:
+            with ThreadPoolExecutor(max_workers=min(len(few), 6)) as pool:
+                wider = list(pool.map(lambda i: self._scout.wider_candidates(needs[i], {p.id for p in found[i]}), few))
+            again = ranker.rank_many(outfit.occasion, [(needs[i].category or "item", needs[i].looking_for,
+                                                        [*found[i], *extra]) for i, extra in zip(few, wider)])
+            for i, (ranked, notes) in zip(few, again):
+                if notes is not None:
+                    judged[i] = (ranked, self._scout.own_close_only(needs[i], ranked, notes))
+        for ranked, notes in judged:
+            outfit.fit_notes.update({pid: why for pid, why in (notes or {}).items() if why})
+        logger.info("Outfit: judged %d pieces in %d call(s), %.1fs", len(needs), 2 if few else 1,
+                    time.monotonic() - started)
+        return [(self._scout.one_per_listing(ranked), notes) for ranked, notes in judged]
 
     def _for_occasion(self, outfit: Outfit, need: ShoppingNeed, products: list[Product],
                       exclude: set[str]) -> list[Product]:
