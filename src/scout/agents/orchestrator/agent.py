@@ -56,6 +56,7 @@ from scout.agents.orchestrator.outfit import OutfitPlanner
 from scout.domain import Outfit, Product, ShoppingNeed
 from scout.tools import CatalogOverviewBuilder, ProductReferenceResolver, ProductRetriever, RetrievalResult
 from scout.tools.cart import Cart
+from scout.tools.review_advice import size_sentence
 from scout.tools.taste_reader import describe
 from scout.tools.wishlist import Wishlist
 from scout.domain.outfit import MAX_LOOKS
@@ -615,7 +616,9 @@ class ScoutOrchestrator(BaseAgent):
                         reason: Optional[str]):
         """Ask which size to add it in. The catalog lists no sizes, so every usual size is taken to be in stock."""
         kind = product.kind or "item"
-        question = f"Great choice! What size would you like in the {kind}? They come in {scale.spoken}."
+        advice = size_sentence(product)          # what reviewers say about its sizing, when enough agree
+        question = " ".join(filter(None, ["Great choice!", advice,
+                                          f"What size would you like in the {kind}? They come in {scale.spoken}."]))
         yield self._update_state(ctx, {
             state_keys.PENDING_SIZE: {"product": product.model_dump(), "suggested": suggested, "reason": reason},
             state_keys.SIZE_CHOICES: scale.options,

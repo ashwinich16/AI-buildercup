@@ -25,10 +25,11 @@ from google.adk.events import Event
 from scout.agents import state_keys
 from scout.agents.elicitation import OutfitStep, TurnUnderstanding, read_turn
 from scout.agents.narration import NarrationTask
-from scout.domain import Change, Outfit, OutfitPlan, Piece, Product, ShoppingNeed
+from scout.domain import Change, Outfit, OutfitPlan, Product, ShoppingNeed
 from scout.domain.sizes import SizeScale, read_size, size_scale
 from scout.agents.model_io import content_text
 from scout.tools import RetrievalResult
+from scout.tools.review_advice import better_size, heads_up, plural, size_advice, size_sentence
 from scout.tools.taste_reader import describe
 
 if TYPE_CHECKING:
@@ -437,17 +438,24 @@ class OutfitPlanner:
                 state_keys.PENDING_SIZE: {"outfit": True, "scale": missing.model_dump(), "kinds": names},
                 state_keys.SIZE_CHOICES: missing.options,
             })
-            opening = "Got it. And" if follow_up else "Lovely! Before I add the outfit to your cart:"
-            yield self._scout._say(ctx, f"{opening} what size would you like for the {names}? "
-                                 f"They come in {missing.spoken}.")
+            # What reviewers say about these pieces' sizing helps them choose (only patterns, with counts).
+            advice = " ".join(list(dict.fromkeys(filter(None, (size_sentence(p) for p in new
+                                                                if size_scale(p) and size_scale(p).key == missing.key))))[:2])
+            opening = "Got it." if follow_up else "Lovely! Before I add the outfit to your cart:"
+            yield self._scout._say(ctx, " ".join(filter(None, [opening, advice,
+                                                               f"What size would you like for the {names}? "
+                                                               f"They come in {missing.spoken}."])))
             return
         sized = [(p, size_scale(p)) for p in new if size_scale(p) is not None]
         if sized and not confirmed:                      # read every size back once before adding
-            kinds = list(dict.fromkeys(f"the {p.kind or 'item'} in {scale.label(known[scale.key])}" for p, scale in sized))
+            kinds = list(dict.fromkeys(self._size_read_back(p, scale, known[scale.key]) for p, scale in sized))
             summary = ", ".join(kinds[:-1]) + f" and {kinds[-1]}" if len(kinds) > 1 else kinds[0]
+            # The downsides most reviewers share, so they decide knowing them (at most two, each with counts).
+            worries = list(dict.fromkeys(filter(None, map(heads_up, new))))[:2]
+            worth = f" Worth knowing before you buy: {'; and '.join(worries)}." if worries else ""
             yield self._scout._update_state(ctx, {state_keys.CONFIRM_SIZES: True})
-            async for item in self._ask(ctx, f"Before I add them: {summary}. Shall I add them in those sizes, or "
-                                             f"would you like to change a size?", ["Add them", "Change sizes"]):
+            async for item in self._ask(ctx, f"Before I add them: {summary}.{worth} Shall I add them in those sizes, "
+                                             f"or would you like to change a size?", ["Add them", "Change sizes"]):
                 yield item
             return
         added = []
@@ -477,6 +485,17 @@ class OutfitPlanner:
         })
         async for event in self._scout.narration.run_async(ctx):
             yield event
+
+    @staticmethod
+    def _size_read_back(product: Product, scale: SizeScale, size: str) -> str:
+        """"the shirt in M", with the size reviewers' experience points to when it runs small or large."""
+        said = f"the {product.kind or 'item'} in {scale.label(size)}"
+        better = better_size(product, scale, size)
+        if better is None:
+            return said
+        runs = "small" if size_advice(product).direction == "up" else "large"
+        they = "they run" if plural(product.kind or "item") else "it runs"
+        return f"{said} (reviewers say {they} {runs}, so {scale.label(better)} may fit better)"
 
     async def size_given(self, ctx: InvocationContext, turn: TurnUnderstanding, pending: dict):
         """They gave a size while the outfit waits to go in the cart: remember it, then carry on adding (which
