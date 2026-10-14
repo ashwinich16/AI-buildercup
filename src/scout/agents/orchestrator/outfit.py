@@ -467,6 +467,15 @@ class OutfitPlanner:
         outfit.changing = None
         wishlist = state_keys.wishlist(ctx.session.state)
         wishlist.remove([product.id for product in products])
+        # Like any purchase: a few things that would complete the look (a straw bag for the beach), the best said.
+        options = (await asyncio.to_thread(self._scout.recommender.options_for_items, new, cart,
+                                           self._scout._suggestion_rules(ctx)) if new else [])
+        suggestion = options[0] if options else None
+        offer = dict(self._scout._offer(ctx, suggestion, at_checkout=False))
+        if options:
+            offer[state_keys.SUGGESTIONS] = [option.model_dump() for option in options]
+            offer[state_keys.SUGGESTED_IDS] = list(dict.fromkeys(
+                list(offer.get(state_keys.SUGGESTED_IDS) or []) + [o.product.id for o in options]))
         yield self._scout._update_state(ctx, {
             **self._scout._learn_from(ctx, "bought", [(describe(p), p.gender) for p in new]),
             state_keys.CART: cart.model_dump(),
@@ -482,8 +491,9 @@ class OutfitPlanner:
             state_keys.LOOK_COUNT: None,
             state_keys.PENDING_SIZE: None,
             state_keys.SIZE_CHOICES: None,
+            **offer,
         })
-        async for event in self._scout.narration.run_async(ctx):
+        async for event in self._scout._narrate_offer(ctx, suggestion):
             yield event
 
     @staticmethod

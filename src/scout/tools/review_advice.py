@@ -18,9 +18,12 @@ from scout.domain.sizes import SizeScale, size_scale
 MIN_REVIEWS = 2          # a pattern, not one person's experience
 
 _SIZE_ASPECT = re.compile(r"siz|fit", re.I)
-_RUNS_SMALL = re.compile(r"size up|sizing up|runs? small|too small|too tight|tight|snug|narrow|smaller than", re.I)
-_RUNS_LARGE = re.compile(r"size down|sizing down|runs? (large|big)|too (large|big|loose)|loose|larger than|bigger than|boxy", re.I)
-_TRUE_TO_SIZE = re.compile(r"true to size|fits? (as expected|well|perfectly)|good fit", re.I)
+_RUNS_SMALL = re.compile(r"size up|sizing up|runs? (\w+ )?small|too small|too tight|tight|snug|narrow|smaller than|"
+                         r"fits? like a (smaller|toddler)|order(ing)? (a|one) size (up|bigger|larger)", re.I)
+_RUNS_LARGE = re.compile(r"size down|sizing down|runs? (\w+ )?(large|big)|too (large|big|loose)|loose|baggy|larger than|"
+                         r"bigger than|boxy|order(ing)? (a|one) size (down|smaller)", re.I)
+_TRUE_TO_SIZE = re.compile(r"true to size|fits? (me )?(as expected|well|perfectly)|(perfect|great|good) fit|"
+                           r"fit (to be |was |is )?(perfect|great|good|as expected)", re.I)
 
 
 class SizeAdvice(BaseModel):
@@ -66,11 +69,12 @@ def possessive(kind: str) -> str:
 
 
 def size_sentence(product: Product) -> str:
-    """One sentence to say before they choose its size, or "" when reviewers agree on nothing."""
+    """One sentence to say before they choose its size: the pattern reviewers share, or (when only one wrote
+    about it) what that one reviewer said, said as one person's experience; "" when no review mentions size."""
     advice = size_advice(product)
     kind = product.kind or "item"
     if advice is None:
-        return ""
+        return _one_reviewer(product)
     run, fit = ("run", "fit") if plural(kind) else ("runs", "fits")
     return {
         "up": f"Reviewers often say the {kind} {run} small ({advice.reviews()}), so you might go one size up.",
@@ -78,6 +82,17 @@ def size_sentence(product: Product) -> str:
         "true": f"Reviewers say the {kind} {fit} true to size ({advice.reviews()}).",
         "mixed": f"Reviewers find the {possessive(kind)} sizing a little inconsistent ({advice.reviews()}), so check your usual size.",
     }[advice.direction]
+
+
+def _one_reviewer(product: Product) -> str:
+    """When a single review mentions its size, its own words, said as one person's experience."""
+    if size_scale(product) is None:
+        return ""
+    point = next((p for p in product.review_points if _SIZE_ASPECT.search(p.aspect) and p.quotes), None)
+    if point is None:
+        return ""
+    quote = point.quotes[0].strip().rstrip(".")
+    return f'Only one reviewer has mentioned the fit so far: "{quote}".' if len(quote) <= 120 else ""
 
 
 def better_size(product: Product, scale: SizeScale, size: str) -> Optional[str]:

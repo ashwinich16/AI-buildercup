@@ -260,6 +260,13 @@ class Recommender:
         self._products[added.id] = added
         return self._ranked([added], cart, rules, limit)
 
+    def options_for_items(self, added: list[Product], cart: Cart, rules: SuggestionRules,
+                          limit: int = 4) -> list[Suggestion]:
+        """A few items that would complete several pieces just added together (a whole outfit)."""
+        for product in added:
+            self._products[product.id] = product
+        return self._ranked(added, cart, rules, limit)
+
     def for_cart(self, cart: Cart, rules: SuggestionRules) -> Optional[Suggestion]:
         """At checkout: anything that would complete the cart as a whole ("you might have forgotten...")."""
         anchors = [p for p in (self._product(item.product_id) for item in cart.items) if p]
