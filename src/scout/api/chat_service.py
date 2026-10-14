@@ -61,6 +61,40 @@ class ProductCard(BaseModel):
     evidence: list[EvidenceView] = Field(default_factory=list)   # review quotes that back this option
 
 
+class ProductFact(BaseModel):
+    name: str                                              # e.g. "colour"
+    value: str                                             # e.g. "navy blue"
+
+
+class ReviewPointView(BaseModel):
+    aspect: str                                            # e.g. "fit"
+    finding: str                                           # e.g. "runs a size small"
+    count: str = ""                                        # e.g. "7 of 20 reviews"
+    heads_up: bool = False
+
+
+class ProductDetail(BaseModel):
+    """Everything about one product, for the shopper to read for themselves."""
+    id: str
+    name: str                                              # short, for the heading
+    title: str                                             # the full listing title
+    kind: Optional[str] = None
+    price: Optional[float] = None
+    rating: Optional[float] = None
+    rating_count: Optional[int] = None
+    images: list[str] = Field(default_factory=list)
+    summary: str = ""
+    facts: list[ProductFact] = Field(default_factory=list)
+    evidence: list[EvidenceView] = Field(default_factory=list)          # quotes that back it, with counts
+    review_points: list[ReviewPointView] = Field(default_factory=list)  # what reviewers mention most
+    reviews_read: Optional[int] = None                                 # how many written reviews these come from
+    occasion: Optional[str] = None                                     # the outfit's occasion, if it is in one
+    occasion_note: Optional[str] = None                                # why it suits that occasion
+    size: Optional[str] = None                                         # the size it will be added in
+    sizes: list[str] = Field(default_factory=list)                     # the sizes it comes in
+    sizes_spoken: Optional[str] = None                                 # e.g. "UK shoe sizes 6 to 12"
+
+
 class CartView(BaseModel):
     items: list[CartItem] = Field(default_factory=list)
     total: float = 0.0
@@ -87,6 +121,7 @@ class BoardTile(BaseModel):
     description: str
     image_url: Optional[str] = None
     price: Optional[float] = None                          # a new piece's price
+    product_id: Optional[str] = None                       # a new piece's product, to show its details
     size: Optional[str] = None                             # the size it will be added in ("L", "32 waist")
     needs_size: bool = False                               # it comes in sizes and none is chosen yet
     owned: bool = False
@@ -287,6 +322,41 @@ class ScoutChatService:
         if outfit:
             known.update({product.id: product for product in outfit.products_to_buy()})
         return [known[i] for i in product_ids if i in known]
+
+    async def product_details(self, user_id: str, session_id: str, product_id: str) -> ProductDetail:
+        """One product this conversation has shown, in full. Raises LookupError if it is not one of them."""
+        found = await self.products(user_id, session_id, [product_id])
+        if not found:
+            raise LookupError(product_id)
+        product = found[0]
+        state = (await self._get(user_id, session_id)).state
+        outfit = state_keys.outfit(state)
+        scale = size_scale(product)
+        facts, seen = [], set()
+        for attribute in product.attributes:
+            key = (attribute.name.lower(), attribute.value.lower())
+            if key not in seen and len(attribute.value) <= 40:
+                seen.add(key)
+                facts.append(ProductFact(name=attribute.name, value=attribute.value))
+        points = [ReviewPointView(aspect=point.aspect, finding=point.finding,
+                                  count=(f"{point.count()} of {product.reviews_analyzed} reviews"
+                                         if point.count() and product.reviews_analyzed else ""),
+                                  heads_up=point.sentiment == "negative")
+                  for point in product.review_points[:5] if point.finding]
+        return ProductDetail(
+            id=product.id, name=_card_name(product), title=product.title, kind=product.kind or None,
+            price=product.price, rating=product.rating, rating_count=product.rating_count,
+            images=product.image_urls[:6],
+            summary=product.spoken_summary_detailed or product.spoken_summary_short or (product.description or "")[:400],
+            facts=facts[:8],
+            evidence=[EvidenceView(quote=e.quote, count=e.count_text(), heads_up=e.sentiment == "negative")
+                      for e in _EVIDENCE.pick(product, state_keys.need(state))],
+            review_points=points, reviews_read=product.reviews_analyzed,
+            occasion=outfit.occasion if outfit else None,
+            occasion_note=outfit.fit_notes.get(product.id) if outfit else None,
+            size=_size_label(product, state.get(state_keys.KNOWN_SIZES) or {}),
+            sizes=scale.options if scale else [], sizes_spoken=scale.spoken if scale else None,
+        )
 
     async def wardrobe_items(self, user_id: str, session_id: str, item_ids: list[str]) -> list[WardrobeItem]:
         """Pieces the shopper owns, in the order asked (e.g. to try a look on)."""
@@ -609,7 +679,7 @@ def _capsule_view(outfit: Optional[Outfit], wardrobe: list[WardrobeItem],
                 card = _small_card(piece.product)
                 size = _size_label(piece.product, known_sizes or {})
                 tiles.append(BoardTile(category=piece.category, description=card.name, image_url=card.image_url,
-                                       price=card.price, changing=changing, size=size,
+                                       price=card.price, product_id=piece.product.id, changing=changing, size=size,
                                        needs_size=size is None and size_scale(piece.product) is not None))
             else:
                 tiles.append(BoardTile(category=piece.category, description=f"No {piece.category} found yet",

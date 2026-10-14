@@ -69,6 +69,11 @@ class SpeechRequest(BaseModel):
     rate: float = 1.0
 
 
+class ProductRequest(BaseModel):
+    session_id: str
+    product_id: str
+
+
 class TryOnRequest(BaseModel):
     session_id: str
     product_ids: list[str] = Field(default_factory=list)    # one product, or the new pieces of one look
@@ -174,6 +179,14 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     async def speak(body: SpeechRequest, _: Shopper = Depends(current_shopper)) -> Response:
         audio = await asyncio.to_thread(speech.synthesize, body.text, body.rate)
         return Response(content=audio, media_type="audio/mpeg")
+
+    @app.post("/api/product")
+    async def product_details(body: ProductRequest, shopper: Shopper = Depends(current_shopper)):
+        """One product shown in this conversation, in full (photos, sizes, facts, what reviewers say)."""
+        try:
+            return await chat.product_details(shopper.id, body.session_id, body.product_id)
+        except LookupError:
+            raise HTTPException(status_code=404, detail="I can't find that product in our conversation.")
 
     @app.post("/api/try-on")
     async def try_on(body: TryOnRequest, shopper: Shopper = Depends(current_shopper)) -> Response:

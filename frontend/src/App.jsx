@@ -17,6 +17,7 @@ import TryOnSheet from "./components/TryOnSheet.jsx";
 import CartSheet from "./components/CartSheet.jsx";
 import WishlistSheet from "./components/WishlistSheet.jsx";
 import SettingsSheet from "./components/SettingsSheet.jsx";
+import ProductDetail from "./components/ProductDetail.jsx";
 
 const EMPTY_SCREEN = {
   products: [], cart: { items: [], total: 0 }, wishlist: { items: [] }, focus_product_id: null, suggestion: null, capsule: null,
@@ -67,6 +68,7 @@ export default function App() {
   const [categories, setCategories] = useState([]); // what the shop sells, offered as first things to ask for
   const [tryOnAdjustable, setTryOnAdjustable] = useState(false); // the try-on follows "tuck the shirt in"
   const [tryOn, setTryOn] = useState(null); // what to try on: { productIds, wardrobeIds, label }, or null
+  const [productShown, setProductShown] = useState(null); // a board piece to read in full: { productId, look, category }
   const [photo, setPhoto] = useState(null); // the shopper's photo for try-on, kept only while the page is open
   const [attachments, setAttachments] = useState([]); // clothes photos attached in the chat: { id, preview, status, note }
   const [choices, setChoices] = useState([]); // short answers to Scout's last question, to tap
@@ -397,6 +399,7 @@ export default function App() {
               onAsk={send}
               onTryOn={setTryOn}
               onOpenWardrobe={() => setOpenSheet("wardrobe")}
+              onOpenProduct={setProductShown}
             />
             <ProductList
               products={screen.products}
@@ -477,6 +480,14 @@ export default function App() {
         sessionId={sessionId}
         wardrobe={screen.wardrobe || []}
         onWardrobe={(wardrobe) => setScreen((current) => ({ ...current, wardrobe }))}
+      />
+      <ProductDetail
+        request={productShown}
+        sessionId={sessionId}
+        busy={busy}
+        onAsk={send}
+        onTryOn={setTryOn}
+        onClose={() => setProductShown(null)}
       />
       <TryOnSheet
         adjustable={tryOnAdjustable}

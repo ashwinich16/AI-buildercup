@@ -93,6 +93,8 @@ export const api = {
   },
   // The shopper's photo ({ data: base64, mimeType }) wearing the products: resolves with a PNG blob.
   // `request`: { productIds, wardrobeIds } — products from the shop, and pieces they own (for a planned look).
+  productDetails: async (sessionId, productId) =>
+    (await request("/api/product", { method: "POST", body: { session_id: sessionId, product_id: productId } })).json(),
   tryOn: async (sessionId, what, photo, wish = "") =>
     (
       await request("/api/try-on", {
