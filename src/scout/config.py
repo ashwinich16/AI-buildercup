@@ -52,6 +52,7 @@ AGENT_TUNING_DEFAULTS = {
     "recommender": AgentTuning(temperature=0.2, thinking_budget=0),         # which kinds go together (cached)
     "stylist": AgentTuning(temperature=0.6, thinking_budget=512),           # plans looks from the wardrobe
     "wardrobe": AgentTuning(temperature=0.2, thinking_budget=0),            # describes a photo of owned clothes
+    "picker": AgentTuning(temperature=0.2, thinking_budget=128),           # picks suggestions for the shopper
     "occasion": AgentTuning(temperature=0.1, thinking_budget=128),         # judges each product for the occasion (128 judges as well as 512; 0 lets hoodies through)
     "taste": AgentTuning(temperature=0.1, thinking_budget=0),               # reads colours, materials... (background)
 }

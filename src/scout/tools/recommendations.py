@@ -40,6 +40,9 @@ class SuggestionRules(BaseModel):
     avoid: list[str] = Field(default_factory=list)             # things the shopper avoids
     suggested_ids: set[str] = Field(default_factory=set)       # never suggest a product twice
     suggested_kinds: set[str] = Field(default_factory=set)     # never offer the same kind twice
+    occasion: str = ""                                         # what they are shopping for, if they said
+    taste: str = ""                                            # the colours, materials and styles they keep choosing
+    wardrobe: list[str] = Field(default_factory=list)          # what they already own, in words
 
 
 class Suggestion(BaseModel):
@@ -139,10 +142,103 @@ class GeminiPairingAdvisor(PairingAdvisor):
 # Recommender
 # ---------------------------------------------------------------------
 
+class SuggestionPicker(ABC):
+    @abstractmethod
+    def pick(self, added: list[Product], rules: SuggestionRules, candidates: list[Suggestion],
+             limit: int) -> Optional[list[Suggestion]]:
+        """The best few candidates for this shopper, best first, each with a reason Scout can say; None when it
+        could not decide (the scored order is used then)."""
+
+
+class _Pick(BaseModel):
+    product_id: str
+    why: str = Field(description="Why it is a good match for them, in at most twelve plain words")
+
+
+class _Picks(BaseModel):
+    picks: list[_Pick] = Field(default_factory=list)
+
+
+PICK_PROMPT = """You are a stylist suggesting what would go well with something a shopper just chose.
+
+THEY JUST CHOSE
+{added}
+
+WHAT IT IS FOR: {occasion}
+THEIR TASTE (what they keep choosing): {taste}
+WHAT THEY ALREADY OWN:
+{wardrobe}
+
+CANDIDATES FROM THE SHOP
+{candidates}
+
+Pick up to {limit} candidates a good stylist would really suggest, best first, of different kinds where you can:
+- They must suit what it is for (nothing casual or sporty for an office or a formal event, nothing formal for the
+  beach) and go with what they just chose (colour, how dressed up it is).
+- Prefer what fits their taste, and what also goes with clothes they already own.
+- Never pick something they already own a very similar piece of.
+- Pick none rather than something that does not fit.
+For each, why: one short reason, from real details, that you could say aloud (e.g. "a crisp white shirt for the
+office that goes with your navy blazer"). Use the ids exactly as given."""
+
+
+class GeminiSuggestionPicker(SuggestionPicker):
+    """One quick Gemini call. If Gemini is slow, adding to the cart does not wait: the scored order is used."""
+
+    TIMEOUT_S = 8
+
+    def __init__(self, settings: Settings):
+        self._client = settings.genai_client(timeout_s=self.TIMEOUT_S)
+        self._model = settings.model_for("picker")
+        tuning = settings.tuning("picker")
+        self._config = types.GenerateContentConfig(
+            temperature=tuning.temperature,
+            response_mime_type="application/json",
+            response_schema=_Picks,
+            thinking_config=types.ThinkingConfig(thinking_budget=tuning.thinking_budget),
+        )
+
+    def pick(self, added: list[Product], rules: SuggestionRules, candidates: list[Suggestion],
+             limit: int) -> Optional[list[Suggestion]]:
+        if not candidates:
+            return []
+        prompt = PICK_PROMPT.format(
+            added="\n".join(f"- {_short(p)}" for p in added),
+            occasion=rules.occasion or rules.need.purpose or "not said",
+            taste=rules.taste or "not known yet",
+            wardrobe="\n".join(f"- {item}" for item in rules.wardrobe) or "- nothing added yet",
+            candidates="\n".join(f"[{s.product.id}] {_short(s.product)} (goes with their {s.goes_with})"
+                                  for s in candidates),
+            limit=limit,
+        )
+        try:
+            response = self._client.models.generate_content(model=self._model, contents=prompt, config=self._config)
+            picks = _Picks.model_validate(json.loads(response.text)).picks
+        except Exception as error:      # a suggestion is a bonus: never hold up adding to the cart
+            logger.warning("Could not pick suggestions: %s", error)
+            return None
+        by_id = {s.product.id: s for s in candidates}
+        chosen = []
+        for pick in picks:
+            if pick.product_id in by_id and all(s.product.id != pick.product_id for s in chosen):
+                chosen.append(by_id[pick.product_id].model_copy(update={"reasons": [pick.why] if pick.why else []}))
+        return chosen[:limit]
+
+
+def _short(product: Product) -> str:
+    facts = [product.title[:90], product.product_type or ""]
+    facts += [a.value for a in product.attributes[:4]] + product.style_tags[:3]
+    if product.price is not None:
+        facts.append(f"${product.price:.0f}")
+    return "; ".join(f for f in facts if f)
+
+
 class Recommender:
-    def __init__(self, catalog: CatalogRepository, advisor: PairingAdvisor, candidates_per_kind: int = 8):
+    def __init__(self, catalog: CatalogRepository, advisor: PairingAdvisor, candidates_per_kind: int = 8,
+                 picker: Optional[SuggestionPicker] = None):
         self._catalog = catalog
         self._advisor = advisor
+        self._picker = picker
         self._limit = candidates_per_kind
         self._products: dict[str, Product] = {}      # cart products by id, kept for the process
 
@@ -197,6 +293,18 @@ class Recommender:
                 score -= 0.6 * rank                # the most essential kinds first
                 scored.append((score, Suggestion(product=candidate, goes_with=anchor.kind or "item", reasons=reasons)))
         scored.sort(key=lambda item: item[0], reverse=True)
+
+        if self._picker is not None:       # a stylist chooses among the best few of each kind
+            shortlist: list[Suggestion] = []
+            per_kind: dict[str, int] = {}
+            for _score_value, suggestion in scored:
+                kind = suggestion.product.kind or ""
+                if per_kind.get(kind, 0) < 3 and all(s.product.id != suggestion.product.id for s in shortlist):
+                    shortlist.append(suggestion)
+                    per_kind[kind] = per_kind.get(kind, 0) + 1
+            picked = self._picker.pick(anchors, rules, shortlist[:15], limit)
+            if picked is not None:
+                return picked
 
         # Best of each kind first (variety: a belt, a t-shirt, sneakers), then the next best of any kind.
         chosen: list[Suggestion] = []

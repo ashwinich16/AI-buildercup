@@ -896,6 +896,9 @@ class ScoutOrchestrator(BaseAgent):
             avoid=need.avoid + [p.value for p in state_keys.profile(state).preferences if p.polarity == "avoid"],
             suggested_ids=set(state.get(state_keys.SUGGESTED_IDS) or []),
             suggested_kinds=set(state.get(state_keys.SUGGESTED_KINDS) or []),
+            occasion=need.purpose or "",
+            taste=state_keys.taste_text(state),
+            wardrobe=[item.description for item in state_keys.wardrobe(state)],
         )
 
     @staticmethod

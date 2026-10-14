@@ -219,7 +219,7 @@ class NarrationAgentBuilder:
             need=state_keys.need(state).summary(),
             profile=state_keys.profile(state).to_prompt_text(),
             search_note=_search_note(state),
-            products=_presented_text(state),
+            products=_presented_text(state) + _wardrobe_note(state),
         )
 
     def _more_options_prompt(self, state: dict) -> str:
@@ -231,7 +231,7 @@ class NarrationAgentBuilder:
             need=state_keys.need(state).summary(),
             already_heard=already,
             search_note=_search_note(state),
-            products=_presented_text(state, kept=set(state.get(state_keys.KEPT) or [])),
+            products=_presented_text(state, kept=set(state.get(state_keys.KEPT) or [])) + _wardrobe_note(state),
         )
 
     def _no_more_options_prompt(self, state: dict) -> str:
@@ -327,6 +327,16 @@ def _outfit_sizes(outfit, state: dict) -> str:
     ask = ("say you'll check the sizes of the " + ", ".join(dict.fromkeys(missing)) +
            " with them before anything goes in the cart." if missing else "say they can change any size.")
     return said + ask
+
+
+def _wardrobe_note(state: dict) -> str:
+    """What they own, so Scout can say an option goes with it (or that they have something very like it)."""
+    owned = [item.description for item in state_keys.wardrobe(state)][:12]
+    if not owned:
+        return ""
+    return ("\n\nTHEIR OWN CLOTHES (when an option goes well with one of these, say so in a few words, e.g. \"it would "
+            "go nicely with your navy blazer\"; if they already own something very like an option, mention it "
+            "kindly; never invent clothes)\n" + "\n".join(f"- {item}" for item in owned))
 
 
 def _heard_text(heard: int) -> str:
