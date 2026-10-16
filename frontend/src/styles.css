@@ -816,6 +816,7 @@ button {
   letter-spacing: -0.015em;
   display: -webkit-box;
   -webkit-line-clamp: 2;
+  line-clamp: 2;
   -webkit-box-orient: vertical;
   overflow: hidden;
 }
@@ -866,6 +867,7 @@ button {
 .evidence__quote {
   display: -webkit-box;
   -webkit-line-clamp: 2;       /* the full review detail is one press away: Describe */
+  line-clamp: 2;
   -webkit-box-orient: vertical;
   overflow: hidden;
 }
@@ -882,6 +884,7 @@ button {
 .evidence__item.is-heads-up .evidence__quote {
   display: -webkit-box;
   -webkit-line-clamp: 2;       /* the full review detail is one press away: Describe */
+  line-clamp: 2;
   -webkit-box-orient: vertical;
   overflow: hidden;
 }
@@ -1571,6 +1574,7 @@ button {
   line-height: 1.3;
   display: -webkit-box;
   -webkit-line-clamp: 2;
+  line-clamp: 2;
   -webkit-box-orient: vertical;
   overflow: hidden;
 }
@@ -1651,6 +1655,7 @@ button {
   line-height: 1.3;
   display: -webkit-box;
   -webkit-line-clamp: 2;
+  line-clamp: 2;
   -webkit-box-orient: vertical;
   overflow: hidden;
 }
@@ -1983,6 +1988,7 @@ button {
   font-size: 0.85rem;
   display: -webkit-box;
   -webkit-line-clamp: 2;
+  line-clamp: 2;
   -webkit-box-orient: vertical;
   overflow: hidden;
 }
@@ -2084,6 +2090,7 @@ button {
   line-height: 1.2;
   display: -webkit-box;
   -webkit-line-clamp: 2;
+  line-clamp: 2;
   -webkit-box-orient: vertical;
   overflow: hidden;
 }
