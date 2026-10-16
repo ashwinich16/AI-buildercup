@@ -10,6 +10,7 @@ Nothing else in the app reads os.environ directly: other modules ask for
 import os
 from dataclasses import dataclass
 from functools import lru_cache
+from typing import Optional
 
 from dotenv import load_dotenv
 
@@ -51,7 +52,8 @@ AGENT_TUNING_DEFAULTS = {
     "recommender": AgentTuning(temperature=0.2, thinking_budget=0),         # which kinds go together (cached)
     "stylist": AgentTuning(temperature=0.6, thinking_budget=512),           # plans looks from the wardrobe
     "wardrobe": AgentTuning(temperature=0.2, thinking_budget=0),            # describes a photo of owned clothes
-    "occasion": AgentTuning(temperature=0.1, thinking_budget=512),         # judges each product for the occasion
+    "picker": AgentTuning(temperature=0.2, thinking_budget=128),           # picks suggestions for the shopper
+    "occasion": AgentTuning(temperature=0.1, thinking_budget=128),         # judges each product for the occasion (128 judges as well as 512; 0 lets hoodies through)
     "taste": AgentTuning(temperature=0.1, thinking_budget=0),               # reads colours, materials... (background)
 }
 
@@ -113,13 +115,16 @@ class Settings:
         from google.adk.models import Gemini
         return Gemini(model=self.model_for(agent), retry_options=_retry())
 
-    def genai_client(self, location: str = ""):
+    def genai_client(self, location: str = "", timeout_s: Optional[float] = None):
         """A Gemini client for direct calls (pairings, occasion ranking, wardrobe photos, try-on), with the
-        same retries."""
+        same retries. `timeout_s`: give up on a call that takes longer (a rare slow answer must not hold up a
+        whole outfit); the caller then does without it."""
         from google import genai
         from google.genai import types
+        options = types.HttpOptions(retry_options=_retry(),
+                                    timeout=int(timeout_s * 1000) if timeout_s else None)
         return genai.Client(vertexai=True, project=self.project_id, location=location or self.vertex_location,
-                            http_options=types.HttpOptions(retry_options=_retry()))
+                            http_options=options)
 
     @property
     def search_serving_config(self) -> str:

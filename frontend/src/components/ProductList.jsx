@@ -165,7 +165,9 @@ function ProductCard({ product, focused, speaking, busy, choosing, saved, onAsk,
           )}
           <button
             className="button button--ghost card__try"
-            onClick={() => onTryOn({ productIds: [product.id], label: product.name })}
+            onClick={() =>
+              onTryOn({ productIds: [product.id], label: product.name, items: [{ name: product.name, price: product.price }] })
+            }
           >
             Try it on
           </button>

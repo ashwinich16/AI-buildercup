@@ -23,6 +23,7 @@ from scout.agents import state_keys
 from scout.agents.voice import VOICE
 from scout.config import Settings
 from scout.domain import ShoppingNeed
+from scout.domain.sizes import size_scale
 from scout.tools.review_evidence import EvidencePicker
 
 _EVIDENCE = EvidencePicker()
@@ -218,7 +219,7 @@ class NarrationAgentBuilder:
             need=state_keys.need(state).summary(),
             profile=state_keys.profile(state).to_prompt_text(),
             search_note=_search_note(state),
-            products=_presented_text(state),
+            products=_presented_text(state) + _wardrobe_note(state),
         )
 
     def _more_options_prompt(self, state: dict) -> str:
@@ -230,7 +231,7 @@ class NarrationAgentBuilder:
             need=state_keys.need(state).summary(),
             already_heard=already,
             search_note=_search_note(state),
-            products=_presented_text(state, kept=set(state.get(state_keys.KEPT) or [])),
+            products=_presented_text(state, kept=set(state.get(state_keys.KEPT) or [])) + _wardrobe_note(state),
         )
 
     def _no_more_options_prompt(self, state: dict) -> str:
@@ -303,8 +304,39 @@ class NarrationAgentBuilder:
                     f"you already said so. {BOARD_DONE}")
         else:
             task = f"In a few short sentences, react to what just happened and say the new total. {BOARD_DONE}"
+        if outfit is not None and event == state_keys.OUTFIT_PLANNED:
+            task += f"\nSizes: {_outfit_sizes(outfit, state)}"
         return OUTFIT.format(voice=VOICE, event=event, outfit=outfit.to_prompt_text() if outfit else "None.",
                              options=options, task=task)
+
+
+def _outfit_sizes(outfit, state: dict) -> str:
+    """One instruction about sizes: the ones known (say them), and that the others are checked before the cart."""
+    known = state.get(state_keys.KNOWN_SIZES) or {}
+    have, missing = [], []
+    for product in outfit.products_to_buy():
+        scale = size_scale(product)
+        if scale is None:
+            continue
+        size = known.get(scale.key)
+        (have if size in scale.options else missing).append(
+            f"the {product.kind or 'item'} in {scale.label(size)}" if size in scale.options else product.kind or "item")
+    if not have and not missing:
+        return "nothing here needs a size; do not mention sizes."
+    said = f"say in a few words that you have {', '.join(have)} (the sizes they gave before). " if have else ""
+    ask = ("say you'll check the sizes of the " + ", ".join(dict.fromkeys(missing)) +
+           " with them before anything goes in the cart." if missing else "say they can change any size.")
+    return said + ask
+
+
+def _wardrobe_note(state: dict) -> str:
+    """What they own, so Scout can say an option goes with it (or that they have something very like it)."""
+    owned = [item.description for item in state_keys.wardrobe(state)][:12]
+    if not owned:
+        return ""
+    return ("\n\nTHEIR OWN CLOTHES (when an option goes well with one of these, say so in a few words, e.g. \"it would "
+            "go nicely with your navy blazer\"; if they already own something very like an option, mention it "
+            "kindly; never invent clothes)\n" + "\n".join(f"- {item}" for item in owned))
 
 
 def _heard_text(heard: int) -> str:

@@ -94,6 +94,7 @@ class Change(BaseModel):
     wish: str = ""                                   # what they want instead, in their words
     price: tuple[Optional[float], Optional[float]] = (None, None)   # a price they gave for this piece alone
     shown: list[str] = Field(default_factory=list)   # products already offered, never offered again
+    replaces: Optional[str] = None                   # the category it takes the place of (jeans for the trousers)
 
     def looks_text(self) -> str:
         return " and ".join(f"look {n + 1}" for n in self.looks)
@@ -168,6 +169,11 @@ class Outfit(BaseModel):
         for number in change.looks:
             look = self.looks[number]
             n = look.index_of(change.category)
+            if n is None and change.replaces:
+                n = look.index_of(change.replaces)
+                if n is not None:                    # jeans in place of the trousers: a new piece of its own kind
+                    look.pieces[n] = Piece(category=change.category, looks_like=change.wish, product=product)
+                    continue
             if n is None:
                 look.pieces.append(Piece(category=change.category, looks_like=change.wish, product=product))
             else:

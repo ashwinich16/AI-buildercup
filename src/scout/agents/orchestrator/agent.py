@@ -56,6 +56,7 @@ from scout.agents.orchestrator.outfit import OutfitPlanner
 from scout.domain import Outfit, Product, ShoppingNeed
 from scout.tools import CatalogOverviewBuilder, ProductReferenceResolver, ProductRetriever, RetrievalResult
 from scout.tools.cart import Cart
+from scout.tools.review_advice import size_sentence
 from scout.tools.taste_reader import describe
 from scout.tools.wishlist import Wishlist
 from scout.domain.outfit import MAX_LOOKS
@@ -216,6 +217,22 @@ class ScoutOrchestrator(BaseAgent):
         pending = ctx.session.state.get(state_keys.PENDING_SIZE)
         if pending and pending.get("outfit") and turn.size and turn.intent in ("choose", "other"):
             async for item in self._outfits.size_given(ctx, turn, pending):   # a size for the outfit's pieces
+                yield item
+            return
+        if ctx.session.state.get(state_keys.CONFIRM_SIZES):            # "add the outfit in those sizes?"
+            async for item in self._outfits.sizes_confirmed(ctx, turn):
+                yield item
+            return
+        where = ctx.session.state.get(state_keys.PENDING_WHERE)
+        if where:                                                       # "in your outfit, or separately?"
+            yield self._update_state(ctx, {state_keys.PENDING_WHERE: None})
+            choice = self._outfits.where_choice(ctx, turn)
+            if choice:
+                async for item in self._outfits.where_answered(ctx, where, choice):
+                    yield item
+                return
+        if state_keys.planning_outfit(ctx.session.state) and self._outfits.asks_where(ctx, turn):
+            async for item in self._outfits.ask_where(ctx, turn):
                 yield item
             return
         if state_keys.planning_outfit(ctx.session.state):
@@ -387,27 +404,40 @@ class ScoutOrchestrator(BaseAgent):
         searched too: a blouse or a shirt may suit the occasion where that exact kind does not."""
         ranked, notes = self.occasion_ranker.rank(occasion, kind, looks_like, products)
         if notes is not None and len(notes) < PRODUCTS_TO_PRESENT and need.category:
-            # Worn in the same place, filed apart: a collared shirt may be a "shirt" or a "top".
-            categories = [need.category, *self._neighbour_categories(need)]
-            taken = exclude | {p.id for p in products}
-            wider = []
-            for category in categories:
-                found = self.retriever.find(need.model_copy(update={"category": category, "product_types": [],
-                                                                    "looking_for": ""}), taken).products
-                wider += found
-                taken |= {p.id for p in found}
+            wider = self.wider_candidates(need, exclude | {p.id for p in products})
             if wider:
-                logger.info("Only %d of %d suit %r; widened to %s", len(notes), len(products), occasion, categories)
-                ranked, notes = self.occasion_ranker.rank(occasion, kind, looks_like, [*products, *wider])
-                # From the other category only real fits (a dress shirt for an office "top"), never a near miss
-                # (jeans when formal trousers run out).
-                own = (need.category or "").lower()
-                notes = {pid: why for pid, why in notes.items()
-                         if not (why.startswith("a close match") and
-                                 next((p.category or "" for p in ranked if p.id == pid), own).lower() != own)}
-        names: set[str] = set()                    # the same product listed twice is one option, not two
-        ranked = [p for p in ranked if not (same_listing_key(p) in names or names.add(same_listing_key(p)))]
-        return ranked, notes
+                logger.info("Only %d of %d suit %r; widened", len(notes), len(products), occasion)
+                wider_ranked, wider_notes = self.occasion_ranker.rank(occasion, kind, looks_like, [*products, *wider])
+                if wider_notes is not None:          # could not judge the wider set: keep the first judgement
+                    ranked, notes = wider_ranked, self.own_close_only(need, wider_ranked, wider_notes)
+        return self.one_per_listing(ranked), notes
+
+    def wider_candidates(self, need: ShoppingNeed, exclude: set[str]) -> list[Product]:
+        """More of what this piece could be: its whole category and the ones the shop files the same kind of
+        thing under (a collared shirt may be a "shirt" or a "top"), never one already found."""
+        categories = [need.category, *self._neighbour_categories(need)]
+        taken, wider = set(exclude), []
+        for category in categories:
+            found = self.retriever.find(need.model_copy(update={"category": category, "product_types": [],
+                                                                "looking_for": ""}), taken).products
+            wider += found
+            taken |= {p.id for p in found}
+        return wider
+
+    @staticmethod
+    def own_close_only(need: ShoppingNeed, ranked: list[Product], notes: dict) -> dict:
+        """From another category only real fits (a dress shirt for an office "top"), never a near miss (jeans
+        when formal trousers run out)."""
+        own = (need.category or "").lower()
+        category = {p.id: (p.category or "").lower() for p in ranked}
+        return {pid: why for pid, why in notes.items()
+                if not (why.startswith("a close match") and category.get(pid, own) != own)}
+
+    @staticmethod
+    def one_per_listing(products: list[Product]) -> list[Product]:
+        """The same product listed twice is one option, not two."""
+        names: set[str] = set()
+        return [p for p in products if not (same_listing_key(p) in names or names.add(same_listing_key(p)))]
 
     async def _more_options(self, ctx: InvocationContext, keep_positions: list[int]):
         """Options they have not heard yet. Only ones that still fit the need: if this message tightened it
@@ -586,7 +616,9 @@ class ScoutOrchestrator(BaseAgent):
                         reason: Optional[str]):
         """Ask which size to add it in. The catalog lists no sizes, so every usual size is taken to be in stock."""
         kind = product.kind or "item"
-        question = f"Great choice! What size would you like in the {kind}? They come in {scale.spoken}."
+        advice = size_sentence(product)          # what reviewers say about its sizing, when enough agree
+        question = " ".join(filter(None, ["Great choice!", advice,
+                                          f"What size would you like in the {kind}? They come in {scale.spoken}."]))
         yield self._update_state(ctx, {
             state_keys.PENDING_SIZE: {"product": product.model_dump(), "suggested": suggested, "reason": reason},
             state_keys.SIZE_CHOICES: scale.options,
@@ -867,6 +899,9 @@ class ScoutOrchestrator(BaseAgent):
             avoid=need.avoid + [p.value for p in state_keys.profile(state).preferences if p.polarity == "avoid"],
             suggested_ids=set(state.get(state_keys.SUGGESTED_IDS) or []),
             suggested_kinds=set(state.get(state_keys.SUGGESTED_KINDS) or []),
+            occasion=need.purpose or "",
+            taste=state_keys.taste_text(state),
+            wardrobe=[item.description for item in state_keys.wardrobe(state)],
         )
 
     @staticmethod
@@ -919,6 +954,10 @@ class ScoutOrchestrator(BaseAgent):
         need = ShoppingNeed.model_validate(state.get(state_keys.NEED) or {})
         presented = len(state.get(state_keys.PRESENTED) or [])
         base = {"need": need, "ready_to_search": False, "understood": text}
+
+        if (state.get(state_keys.PENDING_WHERE) and re.search(r"outfit|look|separate|on (its|their) own", text)) \
+                or (state.get(state_keys.CONFIRM_SIZES) and re.fullmatch(r"(yes,? )?(add them|change sizes)", text)):
+            return TurnUnderstanding(intent="other", **base)            # the answer is read where it is used
 
         pending = state.get(state_keys.PENDING_SIZE)
         if pending:                                   # the answer to "what size?" (or a size button)

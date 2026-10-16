@@ -3,7 +3,7 @@ import { formatPrice } from "../format.js";
 // The outfit as a board: one row per look, each with its own pieces (the shopper's own and new ones), each
 // look ready to try on. Every piece can be changed or removed in its own look. Scout says it out loud too;
 // the buttons are one-press shortcuts that go through the conversation like anything the shopper says.
-export default function CapsuleBoard({ capsule, busy, onAsk, onTryOn, onOpenWardrobe }) {
+export default function CapsuleBoard({ capsule, busy, onAsk, onTryOn, onOpenWardrobe, onOpenProduct }) {
   if (!capsule) return null;
   const toBuy = capsule.to_buy.length;
   const ownedCount = capsule.looks.flatMap((look) => look.tiles).filter((tile) => tile.owned).length;
@@ -40,7 +40,14 @@ export default function CapsuleBoard({ capsule, busy, onAsk, onTryOn, onOpenWard
                   <button
                     className="button button--ghost button--small"
                     onClick={() =>
-                      onTryOn({ productIds: look.product_ids, wardrobeIds: look.wardrobe_ids, label: `${look.title} look` })
+                      onTryOn({
+                        productIds: look.product_ids,
+                        wardrobeIds: look.wardrobe_ids,
+                        label: `${look.title} look`,
+                        items: look.tiles
+                          .filter((tile) => !tile.missing)
+                          .map((tile) => ({ name: tile.description, price: tile.owned ? null : tile.price, owned: tile.owned })),
+                      })
                     }
                   >
                     Try this look on
@@ -53,20 +60,45 @@ export default function CapsuleBoard({ capsule, busy, onAsk, onTryOn, onOpenWard
                     key={tileIndex}
                     className={`capsule__tile ${tile.owned ? "is-owned" : "is-new"} ${tile.missing ? "is-pending" : ""} ${tile.changing ? "is-current" : ""}`}
                   >
-                    <div className="capsule__image">
-                      {tile.image_url ? (
-                        <img src={tile.image_url} alt="" loading="lazy" />
-                      ) : (
-                        <span className="capsule__placeholder muted">
-                          {tile.category}
-                          {tile.owned && <small>No photo</small>}
+                    {tile.product_id ? (
+                      <button
+                        className="capsule__image capsule__open"
+                        aria-label={`Details of the ${tile.category}: ${tile.description}`}
+                        onClick={() => onOpenProduct({ productId: tile.product_id, look: number, category: tile.category })}
+                      >
+                        {tile.image_url ? <img src={tile.image_url} alt="" loading="lazy" /> : null}
+                        <span className="capsule__open-hint" aria-hidden="true">
+                          View details
                         </span>
-                      )}
-                    </div>
+                      </button>
+                    ) : (
+                      <div className="capsule__image">
+                        {tile.image_url ? (
+                          <img src={tile.image_url} alt="" loading="lazy" />
+                        ) : (
+                          <span className="capsule__placeholder muted">
+                            {tile.category}
+                            {tile.owned && <small>No photo</small>}
+                          </span>
+                        )}
+                      </div>
+                    )}
                     <p className="capsule__badge">
                       {tile.changing ? "Changing" : tile.owned ? "Yours" : tile.missing ? "Not found" : "New"}
                     </p>
-                    <p className="capsule__name muted">{tile.description}</p>
+                    {tile.product_id ? (
+                      <button
+                        className="capsule__name capsule__name-link muted"
+                        onClick={() => onOpenProduct({ productId: tile.product_id, look: number, category: tile.category })}
+                      >
+                        {tile.description}
+                      </button>
+                    ) : (
+                      <p className="capsule__name muted">{tile.description}</p>
+                    )}
+                    {tile.price != null && <p className="capsule__price">{formatPrice(tile.price)}</p>}
+                    {tile.size && <p className="capsule__size">Size {tile.size}</p>}
+                    {tile.needs_size && <p className="capsule__size is-open">Size: asked before the cart</p>}
                     <div className="capsule__tile-actions">
                       <button
                         className="link-button"
