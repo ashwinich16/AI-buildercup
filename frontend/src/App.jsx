@@ -14,6 +14,7 @@ import SuggestionsPopup from "./components/SuggestionsPopup.jsx";
 import CapsuleBoard from "./components/CapsuleBoard.jsx";
 import WardrobeSheet from "./components/WardrobeSheet.jsx";
 import TryOnSheet from "./components/TryOnSheet.jsx";
+import PanelResizer from "./components/PanelResizer.jsx";
 import CartSheet from "./components/CartSheet.jsx";
 import WishlistSheet from "./components/WishlistSheet.jsx";
 import SettingsSheet from "./components/SettingsSheet.jsx";
@@ -413,7 +414,16 @@ export default function App() {
             />
           </section>
         )}
-        {hasProducts && <PanelResizer width={assistantWidth} onResize={setAssistantWidth} />}
+        {hasProducts && (
+          <PanelResizer
+            width={assistantWidth}
+            onResize={setAssistantWidth}
+            min={MIN_ASSISTANT_WIDTH}
+            maxShare={MAX_ASSISTANT_SHARE}
+            initial={DEFAULT_ASSISTANT_WIDTH}
+            label="Resize the conversation panel"
+          />
+        )}
 
         <aside className="layout__assistant" id="talk" aria-label="Talk with Scout">
           <ScoutStage
@@ -504,40 +514,5 @@ export default function App() {
         onSettingsChange={setSettings}
       />
     </div>
-  );
-}
-
-// The bar between the products and Scout: drag it, or focus it and use the arrow keys, to resize Scout's panel.
-function PanelResizer({ width, onResize }) {
-  const clamp = (value) =>
-    Math.round(Math.min(Math.max(value, MIN_ASSISTANT_WIDTH), window.innerWidth * MAX_ASSISTANT_SHARE));
-
-  const startDrag = (event) => {
-    event.currentTarget.setPointerCapture(event.pointerId);
-  };
-  const drag = (event) => {
-    if (event.currentTarget.hasPointerCapture(event.pointerId)) onResize(clamp(window.innerWidth - event.clientX));
-  };
-  const onKey = (event) => {
-    const step = { ArrowLeft: 32, ArrowRight: -32 }[event.key];   // left makes Scout's panel wider
-    if (!step) return;
-    event.preventDefault();
-    onResize(clamp(width + step));
-  };
-
-  return (
-    <div
-      className="resizer"
-      role="separator"
-      aria-orientation="vertical"
-      aria-label="Resize the conversation panel"
-      aria-valuenow={width}
-      aria-valuemin={MIN_ASSISTANT_WIDTH}
-      tabIndex={0}
-      onPointerDown={startDrag}
-      onPointerMove={drag}
-      onKeyDown={onKey}
-      onDoubleClick={() => onResize(DEFAULT_ASSISTANT_WIDTH)}
-    />
   );
 }

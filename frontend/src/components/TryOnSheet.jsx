@@ -60,7 +60,7 @@ export default function TryOnSheet({ request, sessionId, photo, onPhoto, onClose
   };
 
   return (
-    <Sheet open={Boolean(request)} onClose={onClose} title="Try on">
+    <Sheet open={Boolean(request)} onClose={onClose} title="Try on" resizable>
       <input ref={fileRef} type="file" accept="image/jpeg,image/png" hidden onChange={choosePhoto} />
       <TryOnItems items={request?.items || []} />
       {!photo ? (

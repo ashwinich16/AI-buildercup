@@ -1701,7 +1701,7 @@ button {
 
 .sheet {
   margin: 0 0 0 auto;
-  width: min(420px, 100vw);
+  width: min(var(--sheet-width, 420px), 100vw);
   height: 100dvh;
   max-height: none;
   padding: 0;
@@ -1724,6 +1724,14 @@ button {
     transform: translateX(32px);
     opacity: 0;
   }
+}
+/* The bar on a resizable sheet's left edge (the try-on): drag it to make the window wider. */
+.sheet__resizer {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 0;
+  z-index: 1;
 }
 .sheet__head {
   display: flex;
