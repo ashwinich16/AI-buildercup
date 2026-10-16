@@ -26,7 +26,7 @@ export default function Header({
           Scout
         </span>
         <span className="header__tagline muted">Conversation styling companion who knows your style</span>
-        {shopper.name && <span className="header__who muted">Shopping as {shopper.name}</span>}
+        {/* {shopper.name && <span className="header__who muted">Shopping as {shopper.name}</span>} */}
       </div>
 
       <nav className="header__actions" aria-label="Conversation, wardrobe, wishlist, cart and settings">

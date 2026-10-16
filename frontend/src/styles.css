@@ -535,6 +535,8 @@ button {
 }
 .header__tagline {
   font-size: 0.85rem;
+  font-style: italic;
+  color: var(--ink);
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -542,7 +544,8 @@ button {
 .brand__tagline {
   margin: 4px 0 0;
   font-size: 1.05rem;
-  color: var(--muted);
+  font-style: italic;
+  color: var(--ink);
 }
 .header__who {
   font-size: 0.85rem;
