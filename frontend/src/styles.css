@@ -533,6 +533,17 @@ button {
   gap: 16px;
   min-width: 0;
 }
+.header__tagline {
+  font-size: 0.85rem;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.brand__tagline {
+  margin: 4px 0 0;
+  font-size: 1.05rem;
+  color: var(--muted);
+}
 .header__who {
   font-size: 0.85rem;
   white-space: nowrap;
@@ -625,6 +636,12 @@ button {
   .header .button--ghost {
     white-space: nowrap;
     padding: 0 8px;
+  }
+}
+
+@media (max-width: 1000px) {
+  .header__tagline {
+    display: none;            /* the header keeps room for its buttons; the tagline shows at sign-in */
   }
 }
 

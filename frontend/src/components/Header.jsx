@@ -25,6 +25,7 @@ export default function Header({
           <span className="brand__mark" aria-hidden="true" />
           Scout
         </span>
+        <span className="header__tagline muted">Conversation styling companion who knows your style</span>
         {shopper.name && <span className="header__who muted">Shopping as {shopper.name}</span>}
       </div>
 

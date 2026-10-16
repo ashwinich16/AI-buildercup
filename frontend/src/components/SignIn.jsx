@@ -26,6 +26,7 @@ export default function SignIn({ onSignedIn }) {
           <span className="brand__mark" />
           Scout
         </p>
+        <p className="brand__tagline">Conversation styling companion who knows your style</p>
         <h1 id="picker-title" tabIndex={-1} ref={headingRef}>
           {config?.mode === "demo" ? "Who's shopping today?" : "Welcome to Scout"}
         </h1>
