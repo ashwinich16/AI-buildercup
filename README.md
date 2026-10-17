@@ -28,6 +28,8 @@ Narration, Product Expert, Comparison, Stylist and Preference). Answers come onl
 from Vertex AI Search and verified review quotes. Learning runs after each reply, so it never slows the
 conversation.
 
+Shopper memory (preferences, taste, wardrobe, cart, wishlist and conversation history) is stored per user in Cloud SQL and the tables are created automatically on first run.
+
 ## Built with
 
 | Layer | Technology |
