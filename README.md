@@ -12,15 +12,15 @@ Live app: https://scout-49799314902.asia-south2.run.app
 
 ## About
 
-Online shopping means endless scrolling, and we still buy clothes that don't suit the occasion or what we
+Online shopping means endless scrolling and we still buy clothes that don't suit the occasion or what we
 already own. Scout fixes that through conversation, by voice or chat.
 
-- **Everyday shopping:** tell Scout what you need; it asks a few questions and brings a handpicked shortlist,
+- **Everyday shopping:** tell Scout what you need, it asks a few questions and brings a handpicked shortlist,
   answers questions (even about product photos), compares options and quotes real reviews.
 - **Occasion outfits, wardrobe first:** Scout plans complete looks from the clothes you own and suggests new
   pieces only for the gaps, within your budget. Change or remove any piece in any look.
 - **Knows your style:** learns your colours, fabrics, patterns and styles from what you own, save and buy.
-- **Also:** virtual try-on on your own photo, wishlist and compare, cart with a size check, and it picks up
+- **Also:** virtual try-on on your own photo, wishlist and compare, cart with a size check and it picks up
   your last conversation where you left off.
 
 Under the hood: 7 Google ADK agents (an Orchestrator that routes each turn in code, plus Understanding,
@@ -114,5 +114,5 @@ gcloud run deploy scout --source . --region asia-south2 --service-account $SA `
   --session-affinity --min-instances 1 --max-instances 1 --memory 2Gi --cpu 1 --timeout 600
 ```
 
-With Google sign-in, add the `run.app` address in Firebase console → Authentication → Settings → Authorized
+With Google sign-in add the `run.app` address in Firebase console → Authentication → Settings → Authorized
 domains.
