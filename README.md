@@ -1,304 +1,118 @@
 # Scout
 
-A voice-first shopping companion for blind and low-vision shoppers, built on Google Cloud
-(Gemini on Vertex AI, Google ADK, Vertex AI Search, Cloud Text-to-Speech, Cloud SQL, Cloud Run).
+**A conversational styling companion who knows your style.**
+Live app: https://scout-49799314902.asia-south2.run.app
 
-Scout talks with the shopper like a friend: it asks a few questions to understand the need, searches the
-catalog, describes options vividly, answers questions about a product (including what its photos show),
-compares products, keeps a cart and a wishlist (saved options can be shown and compared again later), and
-suggests one item that goes with what the shopper chose. It plans outfits for any occasion: exactly the
-number of looks asked for, each with its own pieces, the shopper's own clothes first (added from photos or
-by voice), and any piece can be changed, added or removed in one look. It shows products on the shopper's
-own photo (virtual try-on), remembers what they say about themselves, and learns their taste (colours,
-materials, patterns, styles) from what they buy, save and own. Learning happens after each reply, so it
-never slows the conversation. The conversation is hands-free: the browser listens, Google Cloud
-Text-to-Speech speaks, and short chimes signal whose turn it is.
+## Table of contents
 
-## Repository layout
+- [About](#about)
+- [Built with](#built-with)
+- [Getting started](#getting-started)
+- [How to run](#how-to-run)
 
+## About
 
-```
-AI-buildercup/
-├── src/scout/
-│   ├── config.py, app.py        settings and the composition root (wires every agent)
-│   ├── domain/                  Product, ShoppingNeed, PreferenceProfile, TasteProfile, Outfit, WardrobeItem, sizes
-│   ├── catalog/                 CatalogRepository + Vertex AI Search implementation
-│   ├── tools/                   retrieval, catalog overview, cart, wishlist, wardrobe photos, taste reader,
-│   │                            occasion ranking, images, review evidence, recommendations, try-on
-│   ├── agents/                  orchestrator (agent.py routes; outfit.py: OutfitPlanner), elicitation, narration,
-│   │                            product_expert, comparison, preference, stylist
-│   │                            (+ state_keys.py: shared session state; model_io.py: model input/output)
-│   └── api/                     FastAPI web API: auth, chat sessions (and learning after each turn), speech,
-│                                shopper memory, demo personas
-├── frontend/                    React app (Vite): accessible voice-first UI
-│   └── src/
-│       ├── hooks/useVoice.js    listening (browser speech recognition) and speaking (Cloud TTS)
-│       ├── audio/earcons.js     the "your turn" / "thinking" / "paused" chimes
-│       ├── components/          sign-in, header, Scout stage, products, "goes well with", outfit board,
-│       │                        cart, wishlist, wardrobe, try-on and settings sheets
-│       └── format.js            how prices are shown
-├── pipeline/                    offline data jobs (ingestion, gender, product_type, enrich, review_evidence,
-│                                export) + common.py: settings, Cloud SQL, Gemini, photos shared by all of them
-├── playground/                  `adk web` entry points: elicitation/, scout_app/
-├── scripts/                     smoke tests against real cloud services
-├── Dockerfile                   one Cloud Run service (API + built React app)
-├── requirements.txt, pyproject.toml, .env.example
-```
+Online shopping means endless scrolling, and we still buy clothes that don't suit the occasion or what we
+already own. Scout fixes that through conversation, by voice or chat.
 
-## Prerequisites
+- **Everyday shopping:** tell Scout what you need; it asks a few questions and brings a handpicked shortlist,
+  answers questions (even about product photos), compares options and quotes real reviews.
+- **Occasion outfits, wardrobe first:** Scout plans complete looks from the clothes you own and suggests new
+  pieces only for the gaps, within your budget. Change or remove any piece in any look.
+- **Knows your style:** learns your colours, fabrics, patterns and styles from what you own, save and buy.
+- **Also:** virtual try-on on your own photo, wishlist and compare, cart with a size check, and it picks up
+  your last conversation where you left off.
 
-- Python 3.11 or newer, Node.js 20 or newer, the Google Cloud CLI (`gcloud`)
+Under the hood: 7 Google ADK agents (an Orchestrator that routes each turn in code, plus Understanding,
+Narration, Product Expert, Comparison, Stylist and Preference). Answers come only from products retrieved
+from Vertex AI Search and verified review quotes. Learning runs after each reply, so it never slows the
+conversation.
+
+## Built with
+
+| Layer | Technology |
+|---|---|
+| AI & agents | Google ADK, Gemini on Vertex AI, Gemini Image / Vertex AI Virtual Try-On |
+| Search & data | Vertex AI Search, Cloud SQL (PostgreSQL), Cloud Storage |
+| Voice | Web Speech API (listening), Cloud Text-to-Speech (Scout's voice) |
+| App | React + Vite, FastAPI (streamed replies) |
+| Platform & security | Cloud Run, Firebase Auth (Google sign-in), Secret Manager, IAM |
+| Data | Amazon Reviews 2023 (fashion), enriched with Gemini |
+
+## Getting started
+
+### Prerequisites
+
+- Python 3.11+, Node.js 20+, the Google Cloud CLI (`gcloud`)
+- Chrome or Edge (for voice)
 - A Google Cloud project with these APIs enabled:
 
-  ```bash
-  gcloud services enable aiplatform.googleapis.com discoveryengine.googleapis.com \
-    texttospeech.googleapis.com sqladmin.googleapis.com secretmanager.googleapis.com storage.googleapis.com
-  ```
+```bash
+gcloud services enable aiplatform.googleapis.com discoveryengine.googleapis.com texttospeech.googleapis.com \
+  sqladmin.googleapis.com secretmanager.googleapis.com storage.googleapis.com
+```
 
-- The catalog already exported and imported into a Vertex AI Search structured data store
-  (see [Data pipeline](#data-pipeline))
-- Chrome or Edge for voice (they provide the browser speech recognition Scout listens with)
-
-## One-time setup
-
-**1. Sign in to Google Cloud** (your local credentials are used by Gemini, Search and Text-to-Speech):
+### Installation
 
 ```bash
+# 1. Sign in to Google Cloud
 gcloud auth login
 gcloud auth application-default login
 gcloud config set project YOUR_PROJECT_ID
-```
 
-**2. Configure:** copy `.env.example` to `.env` and fill in your values. At minimum set
-`GOOGLE_CLOUD_PROJECT` and either `SCOUT_SEARCH_ENGINE_ID` or `SCOUT_SEARCH_DATA_STORE_ID`.
+# 2. Configure: copy the example and set at least GOOGLE_CLOUD_PROJECT and SCOUT_SEARCH_ENGINE_ID
+cp .env.example .env
 
-```bash
-cp .env.example .env          # Windows PowerShell: Copy-Item .env.example .env
-```
-
-**3. Python environment:**
-
-```bash
+# 3. Python packages
 python -m venv .venv
-source .venv/bin/activate     # Windows PowerShell: .venv\Scripts\Activate.ps1
+source .venv/bin/activate          # Windows: .venv\Scripts\Activate.ps1
 pip install -r requirements.txt
+
+# 4. Frontend packages
+cd frontend && npm install && cd ..
 ```
 
-**4. Frontend packages:**
+### Catalog (one time)
+
+Build the product catalog and load it into Vertex AI Search (settings come from `.env`):
 
 ```bash
-cd frontend
-npm install
-cd ..
+python pipeline/ingestion.py && python pipeline/gender.py && python pipeline/product_type.py
+python pipeline/enrich.py && python pipeline/review_evidence.py && python pipeline/export.py
 ```
 
-## Run the app (development)
+Then import the exported JSONL into your Vertex AI Search data store (Console → AI Applications → Data Stores
+→ Import → Cloud Storage).
 
-Run the API and the React app in two terminals, both from the repository root with the virtual
-environment active.
+## How to run
 
-**Terminal 1 – API on http://localhost:8000**
+### Locally
+
+Two terminals from the repository root:
 
 ```bash
-# macOS / Linux
+# Terminal 1: API on http://localhost:8000
 PYTHONPATH=src uvicorn scout.api.main:app --reload --port 8000
+# Windows: $env:PYTHONPATH="src"; uvicorn scout.api.main:app --reload --port 8000
+
+# Terminal 2: web app on http://localhost:5173
+cd frontend && npm run dev
 ```
+
+Open http://localhost:5173, sign in, allow the microphone and start talking (or type).
+
+### Deploy to Cloud Run
+
+One service runs the API and the built web app. In PowerShell, with a service account `scout-run` that has
+Vertex AI user, Discovery Engine viewer, Cloud SQL client and Secret Manager accessor roles:
 
 ```powershell
-# Windows PowerShell
-$env:PYTHONPATH="src"; uvicorn scout.api.main:app --reload --port 8000
-```
-
-**Terminal 2 – React app on http://localhost:5173**
-
-```bash
-cd frontend
-npm run dev
-```
-
-Open **http://localhost:5173** in Chrome or Edge, pick a demo shopper, and allow the microphone.
-Scout greets you and then listens continuously; speak after the rising chime. Speaking while Scout
-talks interrupts it, Escape silences it, and the Talk button pauses or resumes listening. You can
-also type. Headphones give the best results, because speakers let the microphone hear Scout.
-
-In the header settings you can choose the **listening language/accent** (English India, US, UK,
-Hindi, Telugu, Tamil), speech speed, high contrast and larger text, or switch shopper.
-
-## Test on your phone
-
-Scout runs in the phone's browser and installs like an app, so the same code serves web and phone. On a
-phone you can attach photos of your clothes straight from the camera or gallery (the camera button in
-the chat box).
-
-The microphone only works over HTTPS, so the phone needs an HTTPS address:
-
-- **Deployed (best):** deploy to Cloud Run (below) and open its `https://…run.app` address on the phone.
-- **Before deploying:** keep both terminals running, then open an HTTPS tunnel to the React app in a
-  third terminal, for example with [cloudflared](https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/downloads/):
-
-  ```bash
-  cloudflared tunnel --url http://localhost:5173
-  ```
-
-  Open the `https://….trycloudflare.com` address it prints on the phone. (`ngrok http 5173` works too.)
-
-On Android, open it in **Chrome**, then menu ⋮ → **Add to Home screen** (or **Install app**): Scout gets its own
-icon and opens full screen. With Google sign-in, add the tunnel or Cloud Run domain under Firebase
-Authentication → Settings → Authorized domains first.
-
-## Test the agents without the UI (ADK web)
-
-```bash
-PYTHONPATH=src adk web playground --port 8080                    # macOS / Linux
-```
-
-```powershell
-$env:PYTHONPATH="src"; adk web playground --port 8080            # Windows PowerShell
-```
-
-Open http://localhost:8080 and choose `scout_app` (the full Scout conversation) or `elicitation`
-(only the need-understanding agent). The playground does not learn preferences or taste: that runs in the
-API server after each turn (`ScoutChatService`).
-
-## Smoke tests
-
-```bash
-# Can we reach Vertex AI Search, and what fields do the documents have?
-PYTHONPATH=src python scripts/check_vertex_search.py "formal shirt for the office"
-PYTHONPATH=src python scripts/check_vertex_search.py "office shoes" --filter 'category: ANY("shoe")'
-
-# Does retrieval (search + relaxation) find sensible products for sample needs?
-PYTHONPATH=src python scripts/check_retrieval.py
-```
-
-On Windows PowerShell run `$env:PYTHONPATH="src"` once in the terminal, then the `python ...` commands.
-
-## Data pipeline
-
-Run once (or whenever the catalog changes). All settings come from `.env`.
-
-```bash
-python pipeline/ingestion.py        # tops every category up to 50 products (office wear for shirts, trousers, bags, accessories)
-python pipeline/gender.py           # who each product is for: men / women / unisex
-python pipeline/product_type.py     # the kind within each category (shirt, polo, dress pants...); flags misfiled items
-python pipeline/enrich.py           # Gemini reads photos, descriptions and reviews -> product_intelligence
-python pipeline/review_evidence.py  # backs each review point with word-for-word quotes and real counts
-python pipeline/export.py           # Cloud SQL -> JSONL in gs://$SCOUT_EXPORT_BUCKET/$SCOUT_EXPORT_OBJECT
-python scripts/check_catalog.py     # products, images, reviews and enrichment per category
-```
-
-`ingestion.py` reads the Amazon_Fashion files of Amazon Reviews 2023 (Hugging Face mirror) and tops
-every category up to 50 products, half men's and half women's, with their best reviews. The kinds within
-each category (shirt, polo, dress pants, laptop bag, tie...) and what each category means are described in
-`CATALOG` in `pipeline/product_type.py`.
-
-Products with no price get an estimate within 10 of their category's average, marked `price_estimated = TRUE`.
-
-Every step only processes products it has not done yet, so re-running is safe. Products that do
-not belong in the shop can be left out without deleting them:
-`UPDATE product SET excluded_reason = 'why' WHERE product_id = '...';` (export.py skips them).
-
-Then import the JSONL into Vertex AI Search: Console → AI Applications → Data Stores → your
-structured data store → Import → Cloud Storage → the exported file (choose a full/replace import
-when re-importing). Make sure `title` and `search_text` are searchable, and `category`,
-`product_type`, `gender` and `price` are filterable (indexable), in the data store schema.
-
-`enrich.py` only processes products that have no `product_intelligence` row yet; to redo everything,
-run `DELETE FROM product_intelligence;` first.
-
-## Key environment variables
-
-| Variable | Purpose |
-|---|---|
-| `GOOGLE_CLOUD_PROJECT`, `GOOGLE_CLOUD_LOCATION`, `GOOGLE_GENAI_USE_VERTEXAI` | Gemini on Vertex AI |
-| `SCOUT_AGENT_MODEL` | default model for every agent |
-| `SCOUT_TRY_ON_ENGINE` | `gemini` (default: Gemini's image model, the whole outfit in one go, keeps the person, follows "tuck the shirt in") or `vto` (Vertex AI Virtual Try-On, very faithful to each garment, no instructions) |
-| `SCOUT_TRY_ON_IMAGE_MODEL` | Gemini image model for `gemini` (default `gemini-2.5-flash-image`) |
-| `SCOUT_TRY_ON_MODEL` / `SCOUT_TRY_ON_LOCATION` | Virtual Try-On model and region for `vto` (defaults `virtual-try-on-001`, `us-central1`) |
-| `SCOUT_<AGENT>_MODEL / _TEMPERATURE / _THINKING_BUDGET` | per-agent tuning (elicitation, narration, product_expert, comparison, preference, recommender, stylist, wardrobe, occasion, taste) |
-| `SCOUT_SEARCH_LOCATION`, `SCOUT_SEARCH_ENGINE_ID` or `SCOUT_SEARCH_DATA_STORE_ID` | Vertex AI Search (the data store id is also needed to look up saved cart items for the checkout suggestion) |
-| `SCOUT_AUTH_MODE` | `demo` (persona picker) or `firebase` (real sign-in) |
-| `SCOUT_TTS_VOICE` | Cloud Text-to-Speech voice |
-| `SCOUT_DB_INSTANCE`, `SCOUT_DB_NAME`, `SCOUT_DB_USER`, `SCOUT_DB_PASSWORD_SECRET` | Cloud SQL: the pipeline, and Scout's memory of each shopper (tables `shopper`, `user_preference`, `taste_mark`, `cart_item`, `wishlist_item`, `wardrobe_item` and `conversation`, created automatically). Empty instance = memory only, lost on restart |
-| `SCOUT_EXPORT_*` | Cloud Storage, used by the pipeline |
-
-## Production build (single server)
-
-FastAPI serves the built React app, so one process (or one Cloud Run service) runs everything:
-
-```bash
-cd frontend && npm run build && cd ..
-PYTHONPATH=src uvicorn scout.api.main:app --port 8000      # then open http://localhost:8000
-```
-
-## Deploy to Cloud Run
-
-One Cloud Run service: the Dockerfile builds the React app and starts the API. Run these once, from the
-repository root, in PowerShell (`gcloud` logged in with `gcloud auth login`).
-
-**1. Project and APIs**
-
-```powershell
-gcloud config set project scout-hackathon
-gcloud services enable run.googleapis.com cloudbuild.googleapis.com artifactregistry.googleapis.com `
-  aiplatform.googleapis.com discoveryengine.googleapis.com texttospeech.googleapis.com `
-  sqladmin.googleapis.com secretmanager.googleapis.com
-```
-
-**2. A service account for Scout, with only what it needs**
-
-```powershell
-gcloud iam service-accounts create scout-run --display-name "Scout on Cloud Run"
-$SA = "scout-run@scout-hackathon.iam.gserviceaccount.com"
-foreach ($role in "roles/aiplatform.user", "roles/discoveryengine.viewer", "roles/cloudsql.client",
-                  "roles/secretmanager.secretAccessor", "roles/serviceusage.serviceUsageConsumer") {
-  gcloud projects add-iam-policy-binding scout-hackathon --member "serviceAccount:$SA" --role $role
-}
-```
-
-**3. Deploy** (settings come from your `.env`; empty lines and comments are skipped)
-
-```powershell
-$SA = "scout-run@scout-hackathon.iam.gserviceaccount.com"
+$SA = "scout-run@YOUR_PROJECT_ID.iam.gserviceaccount.com"
 $envs = (Get-Content .env | Where-Object { $_ -match '^[A-Z_]+=.+' }) -join ','
 gcloud run deploy scout --source . --region asia-south2 --service-account $SA `
   --set-env-vars $envs --allow-unauthenticated --no-cpu-throttling `
-  --session-affinity --min-instances 1 --max-instances 1 --memory 2Gi --cpu 2 --timeout 600
+  --session-affinity --min-instances 1 --max-instances 1 --memory 2Gi --cpu 1 --timeout 600
 ```
 
-It prints the address (`https://scout-….run.app`). Redeploy after a change with the same step 3.
-
-Why these flags:
-- `--allow-unauthenticated`: anyone can open the page; Scout's own sign-in (demo shoppers or Google) decides
-  who is shopping.
-- `--min-instances 1 --max-instances 1 --session-affinity`: one server that is always warm (no cold start in
-  a demo), so a conversation always lives on the same server. Conversations are also saved in Cloud SQL
-  (table `conversation`), so they survive a redeploy.
-- `--region asia-south2`: the same region as Cloud SQL, so each database query takes about a millisecond
-  instead of a quarter of a second. Gemini (`GOOGLE_CLOUD_LOCATION=global`), Vertex AI Search and
-  Text-to-Speech are global; only Virtual Try-On (`SCOUT_TRY_ON_ENGINE=vto`) calls `SCOUT_TRY_ON_LOCATION`.
-- `--no-cpu-throttling`: the server keeps its CPU between requests, so keeping connections warm and saving
-  conversations in the background never slows the next reply.
-
-Each turn logs where its time went, e.g. `Turn timing: overview 0.4s, understood 1.8s, first words 2.6s,
-reply (shop) 4.9s`. Learning runs after the turn and logs its own line, e.g. `Learned from 1 turns in 6.2s`.
-Read them with `gcloud run services logs read scout --region asia-south2 --limit 50`.
-
-With Google sign-in (`SCOUT_AUTH_MODE=firebase`), add the `run.app` address in Firebase console →
-Authentication → Settings → Authorized domains.
-
-On a phone, open the `https://` address in Chrome, allow the microphone, then ⋮ → Add to Home screen.
-
-## Troubleshooting
-
-| Symptom | What to do |
-|---|---|
-| Code changes don't show up | Restart both servers; delete `__pycache__` folders if `adk web` shows old behaviour. |
-| A file reverted to an old version | Your editor saved an old open copy over it: close or revert open files before saving. |
-| Demo shoppers don't appear | Check the API terminal for an error; make sure the API runs on port 8000. |
-| Scout doesn't hear you | Use Chrome or Edge, allow the microphone, and check the listening language in settings. |
-| Scout mishears words | Pick the listening language that matches your accent; Scout also corrects or checks unclear words. |
-| Scout stops talking by itself | The microphone is hearing Scout through the speakers: use headphones or lower the volume. |
-| Search errors | Check `SCOUT_SEARCH_*` in `.env` and run `scripts/check_vertex_search.py`. |
-| `npm run dev` warns about Vite | `@vitejs/plugin-react` 4 supports Vite up to 7: run `npm install vite@^7` in `frontend`. |
-| Permission / credential errors | Run `gcloud auth application-default login` again and check the project in `.env`. |
+With Google sign-in, add the `run.app` address in Firebase console → Authentication → Settings → Authorized
+domains.
