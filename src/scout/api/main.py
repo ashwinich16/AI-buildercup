@@ -37,6 +37,7 @@ from pydantic import BaseModel, Field
 from scout.api.auth import Authenticator, DemoPersonaAuthenticator, FirebaseAuthenticator, Shopper
 from scout.api.chat_service import ScoutChatService, StartedSession
 from scout.api.personas import load_personas
+from scout.api.protection import RateLimiter, SecurityHeaders
 from scout.api.shopper_repository import build_shopper_repository
 from scout.api.speech import SpeechSynthesizer
 from scout.api.warmup import keep_warm
@@ -91,6 +92,7 @@ class WardrobePhotoRequest(BaseModel):
 
 
 MAX_PHOTO_BYTES = 10 * 1024 * 1024   # Vertex AI Virtual Try-On's input limit
+RATE_LIMITS = {"chat": 20, "speech": 120, "try_on": 6, "wardrobe": 15}   # calls per shopper per minute
 
 
 def build_authenticator(settings: Settings) -> Authenticator:
@@ -110,6 +112,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     studio = build_try_on_studio(settings, ImageFetcher())
     tagger = WardrobeTagger(settings, catalog)
     personas = load_personas()
+    limiter = RateLimiter(RATE_LIMITS)
 
     # Warm every cloud connection at start-up and keep it warm, so no shopper waits for a cold start.
     # An empty search matches any catalog; nothing here depends on what the shop sells.
@@ -126,9 +129,17 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         task.cancel()
 
     app = FastAPI(title="Scout", description="Voice-first shopping companion", lifespan=lifespan)
+    app.add_middleware(SecurityHeaders)
 
     async def current_shopper(request: Request) -> Shopper:
         return await auth.shopper(request)
+
+    def limited(action: str):
+        """The signed-in shopper, once this call is within their per-minute limit for the action."""
+        async def shopper_within_limit(shopper: Shopper = Depends(current_shopper)) -> Shopper:
+            limiter.check(shopper.id, action)
+            return shopper
+        return shopper_within_limit
 
     @app.get("/api/auth-config")
     async def auth_config() -> dict:
@@ -157,7 +168,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         return {"cleared": True}
 
     @app.post("/api/chat/stream")
-    async def stream_message(body: ChatRequest, shopper: Shopper = Depends(current_shopper)) -> StreamingResponse:
+    async def stream_message(body: ChatRequest, shopper: Shopper = Depends(limited("chat"))) -> StreamingResponse:
         try:
             await chat.ensure_session(shopper.id, body.session_id)   # 404 before streaming starts, not halfway
         except LookupError:
@@ -176,7 +187,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         return StreamingResponse(lines(), media_type="application/x-ndjson")
 
     @app.post("/api/speech")
-    async def speak(body: SpeechRequest, _: Shopper = Depends(current_shopper)) -> Response:
+    async def speak(body: SpeechRequest, _: Shopper = Depends(limited("speech"))) -> Response:
         audio = await asyncio.to_thread(speech.synthesize, body.text, body.rate)
         return Response(content=audio, media_type="audio/mpeg")
 
@@ -189,7 +200,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             raise HTTPException(status_code=404, detail="I can't find that product in our conversation.")
 
     @app.post("/api/try-on")
-    async def try_on(body: TryOnRequest, shopper: Shopper = Depends(current_shopper)) -> Response:
+    async def try_on(body: TryOnRequest, shopper: Shopper = Depends(limited("try_on"))) -> Response:
         try:
             products = await chat.products(shopper.id, body.session_id, body.product_ids)
             owned = await chat.wardrobe_items(shopper.id, body.session_id, body.wardrobe_ids)
@@ -209,7 +220,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         return Response(content=image.data, media_type=image.mime_type)
 
     @app.post("/api/wardrobe")
-    async def add_to_wardrobe(body: WardrobePhotoRequest, shopper: Shopper = Depends(current_shopper)) -> dict:
+    async def add_to_wardrobe(body: WardrobePhotoRequest, shopper: Shopper = Depends(limited("wardrobe"))) -> dict:
         try:
             await chat.ensure_session(shopper.id, body.session_id)
             photo = base64.b64decode(body.photo, validate=True)
