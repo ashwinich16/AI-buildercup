@@ -26,7 +26,7 @@ class WardrobeItem(BaseModel):
     id: str
     category: str                       # one of the shop's categories, so plans can mix owned and new pieces
     description: str                    # e.g. "navy slim chinos, cotton, smart casual"
-    thumbnail: Optional[str] = None     # a small photo of it (data URL), when it was added from a photo
+    thumbnail: Optional[str] = None     # a small photo of it (data URL) when it was added from a photo
 
 
 # ---------------------------------------------------------------------
@@ -93,7 +93,7 @@ class Change(BaseModel):
     looks: list[int] = Field(default_factory=list)   # look indexes (0 = the first); empty: waiting to hear which
     wish: str = ""                                   # what they want instead, in their words
     price: tuple[Optional[float], Optional[float]] = (None, None)   # a price they gave for this piece alone
-    shown: list[str] = Field(default_factory=list)   # products already offered, never offered again
+    shown: list[str] = Field(default_factory=list)   # products already offered never offered again
     replaces: Optional[str] = None                   # the category it takes the place of (jeans for the trousers)
 
     def looks_text(self) -> str:

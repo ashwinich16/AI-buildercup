@@ -17,10 +17,10 @@ from scout.domain import Product
 class SearchQuery(BaseModel):
     """What to look for. Every constraint is optional."""
 
-    text: str = ""                           # natural language, e.g. "breathable shirt for a beach wedding"
+    text: str = ""                           
     category: Optional[str] = None
-    product_types: list[str] = Field(default_factory=list)   # any of these kinds, e.g. ["shirt", "polo"]
-    gender: Optional[str] = None             # "men" or "women": their items plus unisex ones
+    product_types: list[str] = Field(default_factory=list)   
+    gender: Optional[str] = None             
     min_price: Optional[float] = None
     max_price: Optional[float] = None
     min_rating: Optional[float] = None

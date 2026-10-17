@@ -75,10 +75,10 @@ def read_size(text: str, scale: SizeScale) -> Optional[str]:
     """The size in `text` if it is one of the scale's sizes ("medium" -> "M", "size ten" -> "10"), else None."""
     said = " " + re.sub(r"[^a-z0-9]+", " ", text.lower()).strip() + " "
     if scale.options == _LETTERS or scale.key == "belt":
-        for words, size in _WORDS.items():                       # longest phrases first
+        for words, size in _WORDS.items():                     
             if f" {words} " in said:
                 return size if size in scale.options else None
-        if len(said.split()) > 3:          # a lone letter only in a short answer ("medium", "size m"), not "I'm"
+        if len(said.split()) > 3:         
             return None
         letter = re.search(r" (xs|s|m|l|xl|xxl) ", said)
         return letter.group(1).upper() if letter and letter.group(1).upper() in scale.options else None

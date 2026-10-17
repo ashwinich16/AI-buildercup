@@ -156,7 +156,7 @@ class ScoutOrchestrator(BaseAgent):
             yield self._update_state(ctx, {state_keys.WARDROBE_JUST_ADDED: []})
         step = turn.outfit if turn is not None and turn.intent == "outfit" else None
         if step is not None and step.action == "plan" and not state_keys.planning_outfit(ctx.session.state):
-            # A new outfit: planning is a mode, and how many looks is this outfit's own.
+            # A new outfit: planning is a mode and how many looks is this outfit's own.
             yield self._update_state(ctx, {state_keys.MODE: state_keys.OUTFIT_MODE, state_keys.LOOK_COUNT: None})
         if step is not None and step.look_count:           # how many looks: kept for plans made again
             yield self._update_state(ctx, {state_keys.LOOK_COUNT: min(max(step.look_count, 1), MAX_LOOKS)})
@@ -179,7 +179,7 @@ class ScoutOrchestrator(BaseAgent):
                                                     for look in outfit.looks for p in look.pieces)
                 if turn.intent == "other" and not replan:   # nothing else to do: that is the whole reply
                     turn = turn.model_copy(update={"reply": done})
-                else:                                     # then the looks are planned again, or the request answered
+                else:                                     # then the looks are planned again or the request answered
                     yield self._say(ctx, done)
         if turn is not None and turn.owned_items:          # clothes they told Scout they own
             wardrobe = state_keys.wardrobe(ctx.session.state)
@@ -192,7 +192,7 @@ class ScoutOrchestrator(BaseAgent):
             return
 
         # 2. Reply.
-        evidence: Optional[str] = None      # what the Preference agent should learn from, if anything
+        evidence: Optional[str] = None      # what the Preference agent should learn from
         spoken: list[str] = []
         async for event in self._route(ctx, turn):
             if isinstance(event, str):      # a route may hand back evidence for learning
@@ -206,7 +206,7 @@ class ScoutOrchestrator(BaseAgent):
         timer.mark(f"reply ({turn.intent})")
         yield self._update_state(ctx, {state_keys.CONVERSATION: self._conversation(ctx, "\n\n".join(spoken))})
 
-        # 3. Note what to learn from; the Preference agent learns it after the turn, so no one waits for it.
+        # 3. Note what to learn from, the Preference agent learns it after the turn, so no one waits for it.
         if evidence or turn.lasting_preference:
             pending = list(ctx.session.state.get(state_keys.PREFERENCE_PENDING) or [])
             pending.append({"evidence": evidence, "message": content_text(ctx.user_content, separator=" ")})
@@ -224,7 +224,7 @@ class ScoutOrchestrator(BaseAgent):
                 yield item
             return
         where = ctx.session.state.get(state_keys.PENDING_WHERE)
-        if where:                                                       # "in your outfit, or separately?"
+        if where:                                                       # "in your outfit or separately?"
             yield self._update_state(ctx, {state_keys.PENDING_WHERE: None})
             choice = self._outfits.where_choice(ctx, turn)
             if choice:
@@ -249,7 +249,7 @@ class ScoutOrchestrator(BaseAgent):
         suggestion = (state_keys.suggestion(ctx.session.state, turn.suggestion_position)
                       if turn.about_suggestion else None)
         if suggestion is not None and turn.intent in ("choose", "ask_about_product", "reject"):
-            # They mean the item Scout suggested, not one on screen.
+            # They mean the item Scout suggested not one on screen.
             if turn.intent == "choose":
                 steps = self._choose(ctx, turn, suggestion.product)
             elif turn.intent == "ask_about_product":
@@ -327,7 +327,7 @@ class ScoutOrchestrator(BaseAgent):
             return
 
         first = [p.id for p in result.products[:PRODUCTS_TO_PRESENT]]
-        yield self._update_state(ctx, {         # save results first, so Narration reads them
+        yield self._update_state(ctx, {         
             state_keys.SHORTLIST: [p.model_dump() for p in result.products],
             state_keys.EXACT_MATCHES: result.exact_ids,
             state_keys.RELAXED: result.relaxed,
@@ -360,7 +360,7 @@ class ScoutOrchestrator(BaseAgent):
         ranked, notes = self._suited(need.purpose, kind, need.looking_for, need, result.products, exclude)
         if notes is None:
             return result, {}
-        ranked.sort(key=lambda p: (p.id not in notes, p.id not in result.exact_ids))   # stable within each
+        ranked.sort(key=lambda p: (p.id not in notes, p.id not in result.exact_ids))   
         return result.model_copy(update={"products": ranked}), notes
 
     @staticmethod
@@ -504,9 +504,9 @@ class ScoutOrchestrator(BaseAgent):
             yield self._say(ctx, "Happy to! Which one would you like to hear about: the first, second or third?")
             return
         delta = {state_keys.FOCUS_PRODUCT: product.id}
-        if product.id not in state_keys.shortlist(state):   # the Product Expert reads the focus from the shortlist,
+        if product.id not in state_keys.shortlist(state):  
             delta[state_keys.SHORTLIST] = list(state.get(state_keys.SHORTLIST) or []) + [product.model_dump()]
-            delta[state_keys.SEEN] = list(state.get(state_keys.SEEN) or []) + [product.id]   # and it is not "new" later
+            delta[state_keys.SEEN] = list(state.get(state_keys.SEEN) or []) + [product.id]  
         yield self._update_state(ctx, delta)
         async for event in self.product_expert.run_async(ctx):
             yield event
@@ -525,7 +525,7 @@ class ScoutOrchestrator(BaseAgent):
     async def _compare_products(self, ctx: InvocationContext, compare_ids: list[str]):
         """The Comparison agent analyses these products (ones on screen); Narration speaks it."""
         yield self._update_state(ctx, {state_keys.COMPARE_IDS: compare_ids})
-        async for event in self._silently(self.comparison, ctx):     # analysis is data, not speech
+        async for event in self._silently(self.comparison, ctx):   
             yield event
         yield self._update_state(ctx, {state_keys.NARRATION_TASK: NarrationTask.SPEAK_COMPARISON.value})
         async for event in self.narration.run_async(ctx):
@@ -573,7 +573,7 @@ class ScoutOrchestrator(BaseAgent):
         if scale is not None and size:
             known[scale.key] = size
         wishlist = state_keys.wishlist(ctx.session.state)
-        wishlist.remove([product.id])                 # in the cart now: saving it for later is done
+        wishlist.remove([product.id])              
         delta = {
             **(self._learn_from(ctx, "bought", [(describe(product), product.gender)]) if added else {}),
             state_keys.CART: cart.model_dump(),
@@ -590,7 +590,7 @@ class ScoutOrchestrator(BaseAgent):
         if added and suggested is None:   # one thing that goes with it; never a chain of suggestions
             options = await asyncio.to_thread(self.recommender.options_for_new_item, product, cart,
                                               self._suggestion_rules(ctx))
-            suggestion = options[0] if options else None   # Scout names the best; the screen shows them all
+            suggestion = options[0] if options else None   
             delta.update(self._offer(ctx, suggestion, at_checkout=False))
             if options:
                 delta[state_keys.SUGGESTIONS] = [option.model_dump() for option in options]
@@ -648,15 +648,14 @@ class ScoutOrchestrator(BaseAgent):
         event: dict = {"action": action}
 
         if not cart.items and action in ("view", "checkout"):
-            # Said in code, never by a model: with nothing to read back, a model can invent a cart,
-            # and a blind shopper cannot check the screen.
+            #  with nothing to read back, a model can invent a cart,
             yield self._update_state(ctx, {state_keys.SUGGESTION: None})
             yield self._say(ctx, "Your cart is empty right now. What would you like to find?")
             return
 
         if action in ("remove", "clear", "view"):
             # Plain facts about the cart are said from code: instant, and never wrong about what is in it.
-            reply = self._cart_reply(cart, action, turn.cart_positions)       # changes the cart first
+            reply = self._cart_reply(cart, action, turn.cart_positions)      
             if action != "view":     # what an open suggestion went with may be gone
                 yield self._update_state(ctx, {state_keys.CART: cart.model_dump(), state_keys.SUGGESTION: None})
             yield self._say(ctx, reply)
@@ -680,7 +679,7 @@ class ScoutOrchestrator(BaseAgent):
                 delta.update(self._offer(ctx, reminder, at_checkout=True))
                 delta[state_keys.NARRATION_TASK] = NarrationTask.CHECKOUT_REMINDER.value
         yield self._update_state(ctx, delta)
-        if action == "checkout" and reminder is None:      # read back the order, from code
+        if action == "checkout" and reminder is None:      # read back the order
             yield self._say(ctx, f"Here's your order: {cart.spoken()}. Payment isn't connected in this prototype "
                                  "yet, but your cart is saved for next time.")
             return
@@ -822,7 +821,7 @@ class ScoutOrchestrator(BaseAgent):
         yield self._update_state(ctx, {state_keys.SUGGESTION: None, state_keys.OFFER_AT_CHECKOUT: False})
         if at_checkout:
             checkout = turn.model_copy(update={"intent": "cart", "cart_action": "checkout", "about_suggestion": False})
-            async for item in self._cart(ctx, checkout):     # already reminded once, so this checks out
+            async for item in self._cart(ctx, checkout):     
                 yield item
         else:
             yield self._say(ctx, turn.reply or "No problem at all. Is there anything else I can help you find?")
@@ -860,7 +859,7 @@ class ScoutOrchestrator(BaseAgent):
             state_keys.PRESENTED: first,
             state_keys.SEEN: first,
             state_keys.FOCUS_PRODUCT: product.id,
-            state_keys.SUGGESTION: None,             # it is on screen now
+            state_keys.SUGGESTION: None,         
             state_keys.QUESTIONS_ASKED: 0,
             state_keys.LAST_QUESTION: None,
             state_keys.NARRATION_TASK: NarrationTask.PRESENT_OPTIONS.value,
@@ -912,7 +911,7 @@ class ScoutOrchestrator(BaseAgent):
         state = ctx.session.state
         return {
             state_keys.SUGGESTION: suggestion.model_dump(),
-            state_keys.SUGGESTIONS: [suggestion.model_dump()],   # replaced by the full list when there is one
+            state_keys.SUGGESTIONS: [suggestion.model_dump()],  
             state_keys.SUGGESTED_IDS: list(state.get(state_keys.SUGGESTED_IDS) or []) + [suggestion.product.id],
             state_keys.SUGGESTED_KINDS: list(state.get(state_keys.SUGGESTED_KINDS) or []) + [suggestion.product.kind],
             state_keys.OFFER_AT_CHECKOUT: at_checkout,
@@ -923,7 +922,7 @@ class ScoutOrchestrator(BaseAgent):
 
     async def _nothing(self):
         return
-        yield   # an empty async generator: Scout stays quiet
+        yield  
 
     # -----------------------------------------------------------------
     # Helpers
@@ -957,10 +956,10 @@ class ScoutOrchestrator(BaseAgent):
 
         if (state.get(state_keys.PENDING_WHERE) and re.search(r"outfit|look|separate|on (its|their) own", text)) \
                 or (state.get(state_keys.CONFIRM_SIZES) and re.fullmatch(r"(yes,? )?(add them|change sizes)", text)):
-            return TurnUnderstanding(intent="other", **base)            # the answer is read where it is used
+            return TurnUnderstanding(intent="other", **base)            
 
         pending = state.get(state_keys.PENDING_SIZE)
-        if pending:                                   # the answer to "what size?" (or a size button)
+        if pending:                                   
             scale = (SizeScale.model_validate(pending["scale"]) if pending.get("outfit")
                      else size_scale(Product.model_validate(pending["product"])))
             size = read_size(text, scale) if scale else None

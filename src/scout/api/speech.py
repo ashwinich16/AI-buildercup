@@ -29,7 +29,7 @@ class SpeechSynthesizer:
             return self._synthesize(text, FALLBACK_VOICE, speaking_rate)
 
     def _synthesize(self, text: str, voice_name: str, speaking_rate: float) -> bytes:
-        language_code = "-".join(voice_name.split("-")[:2])      # "en-US-Chirp3-HD-..." -> "en-US"
+        language_code = "-".join(voice_name.split("-")[:2])     
         response = self._client.synthesize_speech(
             input=texttospeech.SynthesisInput(text=text),
             voice=texttospeech.VoiceSelectionParams(language_code=language_code, name=voice_name),

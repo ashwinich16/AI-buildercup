@@ -2,10 +2,9 @@
 Comparison agent: Scout's analyst.
 
 It compares two or more presented products for THIS shopper's need and
-returns a structured ComparisonResult (no speaking style): the differences
+returns a structured ComparisonResult : the differences
 that would change their choice, each product's strengths and drawbacks with
-the source of every fact, and a recommendation only when one is clearly better.
-The Narration agent then speaks it.
+the source of every fact and a recommendation only when one is clearly better.
 
 It sees each product's full facts plus one photo per product, so visual
 differences are judged from the pictures, not guessed.

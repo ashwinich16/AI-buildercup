@@ -99,7 +99,6 @@ class PreferenceAgentBuilder:
             taste=state_keys.taste(state).to_prompt_text(None),
         )
 
-    # Merge in code, so the confidence rules are applied exactly, not left to the model.
     def _merge(self, callback_context: CallbackContext, llm_response: LlmResponse) -> Optional[LlmResponse]:
         update = response_json(llm_response, PreferenceUpdate)
         if update and (update.updates or update.forget):
@@ -107,7 +106,7 @@ class PreferenceAgentBuilder:
             profile = state_keys.profile(state)
             state[state_keys.PREFERENCES] = profile.merge(update.updates, update.forget).model_dump()
             taste = state_keys.taste(state)
-            if taste.forget([key.value for key in update.forget]):     # "forget that I like navy": learned too
+            if taste.forget([key.value for key in update.forget]):    
                 state[state_keys.TASTE] = taste.model_dump()
             logger.info("Preferences updated: +%d, forgotten %d", len(update.updates), len(update.forget))
         return None

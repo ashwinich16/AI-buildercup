@@ -54,7 +54,7 @@ class PreferenceProfile(BaseModel):
                 confidence = min(LEARNED_MAX, old.confidence + LEARNED_STEP)
             else:
                 confidence = min(update.confidence, LEARNED_START)
-            items[update.key()] = update.model_copy(update={   # latest polarity wins: people change their minds
+            items[update.key()] = update.model_copy(update={   
                 "source": "stated" if stated else "learned",
                 "confidence": round(confidence, 2),
                 "evidence": evidence,

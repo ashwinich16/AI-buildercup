@@ -44,7 +44,7 @@ class FieldMap:
     review_points: tuple[str, ...] = ("review_points", "review_aspects")
     review_excerpts: tuple[str, ...] = ("review_excerpts",)
     reviews_analyzed: tuple[str, ...] = ("reviews_analyzed",)
-    ignored: tuple[str, ...] = ("search_text",)   # index-only fields, never shown to agents
+    ignored: tuple[str, ...] = ("search_text",)   
 
 
 class ProductMapper:
@@ -131,7 +131,7 @@ def _integer(value: Any) -> Optional[int]:
 
 
 def _attributes(value: Any) -> list[Attribute]:
-    if isinstance(value, dict):   # {"color": "navy", ...} -> facts observed in photos
+    if isinstance(value, dict):  
         return [Attribute(name=k.replace("_", " "), value=_text(v), source="image")
                 for k, v in value.items() if not _is_empty(v)]
     if isinstance(value, list):
@@ -149,7 +149,7 @@ def _attributes(value: Any) -> list[Attribute]:
 
 
 def _review_points(value: Any) -> list[ReviewPoint]:
-    if isinstance(value, dict):   # {"fit_feedback": ["runs small", ...]}
+    if isinstance(value, dict): 
         aspect_name = lambda key: key.replace("_feedback", "").replace("_", " ")
         return [ReviewPoint(aspect=aspect_name(k), finding=_text(f))
                 for k, findings in value.items()

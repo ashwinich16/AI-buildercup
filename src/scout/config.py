@@ -44,7 +44,7 @@ class AgentTuning:
 # SCOUT_<AGENT>_THINKING_BUDGET and SCOUT_<AGENT>_MODEL, e.g. SCOUT_PRODUCT_EXPERT_MODEL.
 # A new agent only needs one line here.
 AGENT_TUNING_DEFAULTS = {
-    "elicitation": AgentTuning(temperature=0.5, thinking_budget=512),       # 512 keeps the asking rules; 256 broke them
+    "elicitation": AgentTuning(temperature=0.5, thinking_budget=512),       # 512 keeps the asking rules
     "narration": AgentTuning(temperature=0.7, thinking_budget=0),           # wording only (no thinking: ~1s faster)
     "product_expert": AgentTuning(temperature=0.3, thinking_budget=1024),   # factual + visual
     "comparison": AgentTuning(temperature=0.2, thinking_budget=2048),       # deepest reasoning, consistent
@@ -53,7 +53,7 @@ AGENT_TUNING_DEFAULTS = {
     "stylist": AgentTuning(temperature=0.6, thinking_budget=512),           # plans looks from the wardrobe
     "wardrobe": AgentTuning(temperature=0.2, thinking_budget=0),            # describes a photo of owned clothes
     "picker": AgentTuning(temperature=0.2, thinking_budget=128),           # picks suggestions for the shopper
-    "occasion": AgentTuning(temperature=0.1, thinking_budget=128),         # judges each product for the occasion (128 judges as well as 512; 0 lets hoodies through)
+    "occasion": AgentTuning(temperature=0.1, thinking_budget=128),         # judges each product for the occasion (128 judges as well as 512 but 0 lets hoodies through)
     "taste": AgentTuning(temperature=0.1, thinking_budget=0),               # reads colours, materials... (background)
 }
 

@@ -34,7 +34,7 @@ def build_learner(settings: Settings | None = None) -> BaseAgent:
 def build_root_agent(settings: Settings | None = None, catalog: CatalogRepository | None = None) -> BaseAgent:
     settings = settings or get_settings()
     catalog = catalog or build_catalog(settings)
-    images = ImageFetcher()                  # shared, so photos downloaded once are reused by every agent
+    images = ImageFetcher()                  
     return ScoutOrchestrator(
         elicitation=ElicitationAgentBuilder(settings, catalog).build(),
         narration=NarrationAgentBuilder(settings).build(),

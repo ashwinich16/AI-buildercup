@@ -18,7 +18,7 @@ class Persona(BaseModel):
     id: str
     name: str
     description: str
-    guest: bool = False      # a fresh, nameless shopper each time it is picked (for trying Scout out)
+    guest: bool = False      
     preferences: list[Preference] = Field(default_factory=list)
 
 

@@ -57,7 +57,7 @@ class OutfitPlanner:
             return turn
         owned = {item.id for item in state_keys.wardrobe(ctx.session.state)}
         uses_removed = any(p.owned and p.owned not in owned for look in outfit.looks for p in look.pieces)
-        if turn.owned_items or (turn.wardrobe_remove and uses_removed):   # their wardrobe changed: plan again
+        if turn.owned_items or (turn.wardrobe_remove and uses_removed):   
             return turn.model_copy(update={"intent": "outfit", "outfit": OutfitStep(action="plan")})
         changing = outfit.changing if outfit.changing and outfit.changing.looks else None
         wish = ", ".join(turn.need.must_have) or None
@@ -69,7 +69,7 @@ class OutfitPlanner:
             step = OutfitStep(action="change", category=turn.need.category, wish=wish,
                               looks=[n + 1 for n in changing.looks] if same else [])
         elif turn.intent in ("shop", "more_options", "reject"):
-            step = OutfitStep(action="talk")         # nothing to search outside the outfit: talk about it
+            step = OutfitStep(action="talk")         
         else:
             return turn
         return turn.model_copy(update={"intent": "outfit", "outfit": step})
@@ -111,7 +111,7 @@ class OutfitPlanner:
 
     async def where_answered(self, ctx: InvocationContext, where: dict, choice: str):
         need = ShoppingNeed.model_validate(where["need"])
-        if choice == "separate":                 # regular shopping (to the cart); the board stays on screen
+        if choice == "separate":                 
             yield self._scout._update_state(ctx, {state_keys.MODE: None, state_keys.NEED: need.model_dump()})
             async for item in self._scout._search_and_narrate(ctx):
                 yield item
@@ -136,12 +136,12 @@ class OutfitPlanner:
         said = turn.size or text
         named = [(key, read_size(said, scale)) for key, scale in scales.items() if read_size(said, scale)]
         if len(named) == 1 and not re.search(r"\b(yes|add them|go ahead|sure|ok|okay|fine|perfect)\b", text):
-            key, size = named[0]                 # "make the shoes a 10": that size, then check again
+            key, size = named[0]                
             yield self._scout._update_state(ctx, {state_keys.KNOWN_SIZES: {**known, key: size}})
             async for item in self._add_outfit_to_cart(ctx, outfit):
                 yield item
             return
-        if re.search(r"\b(change|different|other|no)\b", text):   # ask every size again
+        if re.search(r"\b(change|different|other|no)\b", text):  
             yield self._scout._update_state(ctx, {state_keys.KNOWN_SIZES: {k: v for k, v in known.items()
                                                                            if k not in scales}})
             async for item in self._add_outfit_to_cart(ctx, outfit):
@@ -175,7 +175,7 @@ class OutfitPlanner:
         """The Stylist plans the looks, then a product is found for every new piece. Planning takes a few
         seconds, so Scout says straight away that it is on it."""
         state = ctx.session.state
-        yield self._scout._update_state(ctx, {state_keys.STYLIST_PLAN: None})   # never reuse an older plan
+        yield self._scout._update_state(ctx, {state_keys.STYLIST_PLAN: None})   
         own = " from your wardrobe" if state_keys.usable_wardrobe(state) else ""
         yield self._scout._say(ctx, f"Lovely! Give me a few seconds while I plan your looks{own}.")
         started = time.monotonic()
@@ -186,7 +186,7 @@ class OutfitPlanner:
             except asyncio.TimeoutError:
                 logger.warning("The Stylist took longer than %ss (attempt %d)", STYLIST_TIMEOUT_S, attempt)
                 events = []
-            except Exception:                    # a failed call: try again rather than give up at once
+            except Exception:                    
                 logger.exception("The Stylist failed (attempt %d)", attempt)
                 events = []
             for event in events:
@@ -379,7 +379,7 @@ class OutfitPlanner:
             return products
         ranked, notes = self._scout._suited(outfit.occasion, need.category or "item", need.looking_for, need, products,
                                      exclude)
-        if notes is None:                         # could not judge: the search order, as before
+        if notes is None:                      
             return ranked
         outfit.fit_notes.update({pid: why for pid, why in notes.items() if why})
         return [p for p in ranked if p.id in notes]
@@ -438,7 +438,7 @@ class OutfitPlanner:
                 state_keys.PENDING_SIZE: {"outfit": True, "scale": missing.model_dump(), "kinds": names},
                 state_keys.SIZE_CHOICES: missing.options,
             })
-            # What reviewers say about these pieces' sizing helps them choose (only patterns, with counts).
+            # What reviewers say about these pieces sizing helps them choose (only patterns, with counts).
             advice = " ".join(list(dict.fromkeys(filter(None, (size_sentence(p) for p in new
                                                                 if size_scale(p) and size_scale(p).key == missing.key))))[:2])
             opening = "Got it." if follow_up else "Lovely! Before I add the outfit to your cart:"
@@ -447,7 +447,7 @@ class OutfitPlanner:
                                                                f"They come in {missing.spoken}."])))
             return
         sized = [(p, size_scale(p)) for p in new if size_scale(p) is not None]
-        if sized and not confirmed:                      # read every size back once before adding
+        if sized and not confirmed:                      
             kinds = list(dict.fromkeys(self._size_read_back(p, scale, known[scale.key]) for p, scale in sized))
             summary = ", ".join(kinds[:-1]) + f" and {kinds[-1]}" if len(kinds) > 1 else kinds[0]
             # The downsides most reviewers share, so they decide knowing them (at most two, each with counts).
@@ -487,7 +487,7 @@ class OutfitPlanner:
             state_keys.OUTFIT: outfit.model_dump(),
             state_keys.PRESENTED: [],
             state_keys.MODE: None,
-            state_keys.SET_ASIDE: [],          # set aside for that outfit only
+            state_keys.SET_ASIDE: [],        
             state_keys.LOOK_COUNT: None,
             state_keys.PENDING_SIZE: None,
             state_keys.SIZE_CHOICES: None,

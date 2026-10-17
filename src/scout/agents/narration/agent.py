@@ -3,7 +3,7 @@ Narration agent: Scout's "voice".
 
 It turns what the other steps found into short, warm, spoken language that a
 blind or low-vision shopper can picture. It does not search, decide or
-remember anything; it only speaks, and only from the facts it is given.
+remember anything; it only speaks and only from the facts it is given.
 
 What to narrate is a NarrationTask the Orchestrator puts in session state.
 Each task has its own prompt, so new tasks are added without changing
@@ -38,8 +38,6 @@ class NarrationTask(str, Enum):
     CHECKOUT_REMINDER = "checkout_reminder"  # before checkout: the one item they might have forgotten
     OUTFIT = "outfit"                     # the outfit on the board: what was planned or changed
 
-
-# Lights up each option on screen while Scout talks about it (the frontend reads and hides the tags).
 SCREEN_CUE = ("Screen cue: right before you start talking about an option, write its tag, [[1]] for Option 1, "
               "[[2]] for Option 2, and so on (the option numbers below). Tags are never spoken; they light up that "
               "option on screen while you describe it. Write each tag once, at the start of the sentence that begins "

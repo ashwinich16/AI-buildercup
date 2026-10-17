@@ -49,7 +49,7 @@ class VertexSearchCatalog(CatalogRepository):
         self._mapper = mapper or ProductMapper()
         self._fields = filter_fields or FilterFields()
         self._search_client = discoveryengine.SearchServiceClient(client_options=self._client_options())
-        self._server_filtering = True        # switched off once if the schema rejects our filters
+        self._server_filtering = True        
         self._categories: Optional[list[str]] = None
         self._product_types: Optional[list[str]] = None
 
@@ -84,7 +84,7 @@ class VertexSearchCatalog(CatalogRepository):
             return None
 
     def categories(self) -> list[str]:
-        if self._categories is None:        # the catalog rarely changes; ask once per process
+        if self._categories is None:        
             self._categories = (self._facet_values(self._fields.category)
                                 or self._values_from_documents(lambda p: p.category))
         return self._categories

@@ -171,7 +171,7 @@ class CloudSqlShopperRepository(ShopperRepository, ConversationStore):
             updated_at  TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
             PRIMARY KEY (user_id, session_id)
         )""",
-        # Conversations nobody came back to within a week are not worth keeping.
+
         "DELETE FROM conversation WHERE updated_at < CURRENT_TIMESTAMP - INTERVAL '7 days'",
     ]
 
@@ -260,7 +260,7 @@ class CloudSqlShopperRepository(ShopperRepository, ConversationStore):
         wanted = {item.id for item in items}
         cursor.execute("SELECT item_id FROM wardrobe_item WHERE user_id = %s", (user_id,))
         for (item_id,) in cursor.fetchall():
-            if item_id not in wanted:                       # taken out of the wardrobe
+            if item_id not in wanted:                       
                 cursor.execute("DELETE FROM wardrobe_item WHERE user_id = %s AND item_id = %s", (user_id, item_id))
         for item in items:
             cursor.execute(
@@ -271,9 +271,9 @@ class CloudSqlShopperRepository(ShopperRepository, ConversationStore):
 
     @staticmethod
     def _save_preferences(cursor, user_id: str, preferences: list[Preference]) -> None:
-        wanted = {p.key(): p for p in preferences}           # (attribute, value, scope), lowercased
+        wanted = {p.key(): p for p in preferences}          
         cursor.execute("SELECT attribute, value, scope FROM user_preference WHERE user_id = %s", (user_id,))
-        for key in {tuple(row) for row in cursor.fetchall()} - set(wanted):   # forgotten ones
+        for key in {tuple(row) for row in cursor.fetchall()} - set(wanted):  
             cursor.execute(
                 "DELETE FROM user_preference WHERE user_id = %s AND attribute = %s AND value = %s AND scope = %s",
                 (user_id, *key))
@@ -292,7 +292,7 @@ class CloudSqlShopperRepository(ShopperRepository, ConversationStore):
         wanted = {item.product_id for item in items}
         cursor.execute("SELECT product_id FROM cart_item WHERE user_id = %s", (user_id,))
         for (product_id,) in cursor.fetchall():
-            if product_id not in wanted:                    # removed from the cart
+            if product_id not in wanted:                    
                 cursor.execute("DELETE FROM cart_item WHERE user_id = %s AND product_id = %s",
                                (user_id, product_id))
         for position, item in enumerate(items, start=1):
@@ -326,7 +326,7 @@ class CloudSqlShopperRepository(ShopperRepository, ConversationStore):
     def _save_taste(cursor, user_id: str, marks: list[TasteMark]) -> None:
         wanted = {mark.key(): mark for mark in marks}
         cursor.execute("SELECT trait, value, style FROM taste_mark WHERE user_id = %s", (user_id,))
-        for key in {tuple(row) for row in cursor.fetchall()} - set(wanted):     # forgotten, or dropped as lightest
+        for key in {tuple(row) for row in cursor.fetchall()} - set(wanted):    
             cursor.execute("DELETE FROM taste_mark WHERE user_id = %s AND trait = %s AND value = %s AND style = %s",
                            (user_id, *key))
         for mark in marks:
@@ -403,7 +403,7 @@ def build_shopper_repository(settings: Settings) -> CloudSqlShopperRepository | 
         logger.warning("SCOUT_DB_INSTANCE not set: names, preferences and carts live in memory only.")
         return InMemoryShopperRepository()
 
-    from google.cloud import secretmanager                 # only needed with Cloud SQL
+    from google.cloud import secretmanager                 
     from google.cloud.sql.connector import Connector
 
     secret = (f"projects/{settings.project_id}/secrets/{settings.db_password_secret}/versions/latest")

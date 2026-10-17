@@ -4,19 +4,18 @@ Elicitation agent: Scout's "ears".
 On every turn it reads the shopper's message and returns a TurnUnderstanding:
   - what the shopper wants to do now (intent)
   - the updated ShoppingNeed, merged with what was already known
-  - what is still unclear, and whether it is clear enough to search
+  - what is still unclear and whether it is clear enough to search
   - if not, ONE friendly question
 
-The agent itself decides when the need is clear enough; there is no fixed
+The agent itself decides when the need is clear enough, there is no fixed
 number of questions. Code only adds a safety cap so a confused model can never
 keep a blind shopper stuck in questions.
 
-It does not search, compare or narrate, and it knows nothing about field
+It does not search, compare or narrate and it knows nothing about field
 names: the categories it offers come from the catalog at runtime.
 
 Efficiency: the agent does not replay the whole chat history. It sees only the
-current message plus a compact state (need so far, last question, questions
-asked), which keeps every call small.
+current message plus a compact state which keeps every call small.
 """
 
 import logging
@@ -41,16 +40,16 @@ from scout.tools.retrieval import word_stems
 logger = logging.getLogger(__name__)
 
 MAX_OUTPUT_TOKENS = 4096   # thinking + the JSON answer
-GENDER_STYLES = ("men", "women")   # the styles ShoppingNeed.gender can name
+GENDER_STYLES = ("men", "women")
 
 Intent = Literal[
     "shop",               # describing or refining what they want
-    "ask_about_product",  # wants a product described, or has a question about one presented product
+    "ask_about_product",  # wants a product described or has a question about one presented product
     "compare",            # wants presented products compared
     "more_options",       # wants other options for the same need
     "choose",             # has decided on a product (Scout adds it to the cart)
     "cart",               # wants to hear, change or check out their cart
-    "wishlist",           # wants a product saved for later, or their saved products shown, compared or removed
+    "wishlist",           # wants a product saved for later or their saved products shown, compared or removed
     "see_suggestion",     # wants to see other items like the one Scout suggested to go with their cart
     "outfit",             # wants their outfits planned for a trip, a week or an event, or is steering the plan
     "pause",              # wants Scout to stop talking or wait, without ending the conversation
@@ -159,8 +158,7 @@ class TurnUnderstanding(BaseModel):
         return self.outfit.action if self.intent == "outfit" and self.outfit else None
 
 
-# Intents and behaviour are described by MEANING, never by sample phrases, so any
-# wording or language works and the model does not copy our examples.
+# Intents and behaviour are described by MEANING, never by sample phrases
 INSTRUCTION = """You are Scout, a warm and friendly shopping companion for blind and low-vision shoppers. Talk like a good friend who loves helping with shopping: relaxed, kind, encouraging, never formal or robotic. In this step you listen and understand; another step will find the products.
 
 Understand what the shopper MEANS, whatever words or language they use. Never depend on particular phrases.
@@ -321,7 +319,7 @@ class ElicitationAgentBuilder:
     def __init__(self, settings: Settings, catalog: CatalogRepository):
         self._settings = settings
         self._catalog = catalog
-        self._genders_by_category: dict[str, set[str]] = {}   # e.g. "jeans" -> {"men", "women"}
+        self._genders_by_category: dict[str, set[str]] = {}
 
     def build(self) -> LlmAgent:
         tuning = self._settings.tuning("elicitation")
@@ -334,7 +332,7 @@ class ElicitationAgentBuilder:
             include_contents="none",            # compact state instead of full history
             output_schema=TurnUnderstanding,
             output_key=state_keys.TURN,
-            # The cap cuts off a model stuck repeating itself in seconds; a normal answer is well under it.
+            # The cap cuts off a model stuck repeating itself in seconds, a normal answer is well under it.
             generate_content_config=types.GenerateContentConfig(temperature=tuning.temperature,
                                                                 max_output_tokens=MAX_OUTPUT_TOKENS),
             planner=BuiltInPlanner(thinking_config=types.ThinkingConfig(
@@ -396,12 +394,12 @@ class ElicitationAgentBuilder:
         if turn.unavailable_category:
             requested = list(state.get(state_keys.REQUESTED_CATEGORIES) or [])
             requested.append(turn.unavailable_category)
-            state[state_keys.REQUESTED_CATEGORIES] = requested   # honest: the request really is noted
+            state[state_keys.REQUESTED_CATEGORIES] = requested
 
         self._settle_suggestion(state, turn)
         self._carry_outfit_request(state, turn)
         turn.need.product_types = self._known_types(turn.need.product_types)
-        if turn.need.gender is None and turn.style_answer:   # the answer to "whose style?", asked on its own
+        if turn.need.gender is None and turn.style_answer:
             turn.need.gender = turn.style_answer
         turn.need.gender = self._kept_gender(state, turn.need)
         state[state_keys.NEXT_UP] = self._next_up(state, turn)
@@ -425,7 +423,7 @@ class ElicitationAgentBuilder:
             state[state_keys.QUESTIONS_ASKED] = asked + 1
             state[state_keys.LAST_QUESTION] = turn.question
         if not turn.question or turn.ready_to_search:
-            turn.choices = []                       # answers to tap belong to a question
+            turn.choices = []                      
         if turn.ready_to_search:
             state[state_keys.QUESTIONS_ASKED] = 0
             state[state_keys.LAST_QUESTION] = None
@@ -435,7 +433,7 @@ class ElicitationAgentBuilder:
 
     @staticmethod
     def _kept_gender(state, need: ShoppingNeed) -> Optional[str]:
-        """The model sometimes drops a style the shopper already gave; keep it while the category stays the same,
+        """The model sometimes drops a style the shopper already gave, keep it while the category stays the same,
         or when they move on to something they asked for together with it (STILL TO LOOK FOR).
 
         Any other new category may be for someone else, so there the model's answer stands (it asks again).
@@ -456,8 +454,8 @@ class ElicitationAgentBuilder:
     @staticmethod
     def _forget_heard_if_need_changed(state, need: ShoppingNeed) -> None:
         """Options were heard against the need as it was. Once it changes (a quality is no longer avoided, a new
-        price limit...), the ones that fit the new need count as new again, so "more" or "others" can show them."""
-        wording = {"looking_for"}   # every other field changes which products fit
+        price limit...), the ones that fit the new need count as new again so "more" or "others" can show them."""
+        wording = {"looking_for"}   
         if need.model_dump(exclude=wording) != state_keys.need(state).model_dump(exclude=wording):
             state[state_keys.SEEN] = []
 
@@ -472,7 +470,7 @@ class ElicitationAgentBuilder:
         if turn.intent == "outfit" and turn.outfit is None:
             turn.outfit = OutfitStep(action="talk" if state_keys.outfit(state) else "plan")
         if turn.outfit_action() == "plan":
-            turn.need.category, turn.need.product_types = None, []   # a plan starts from the occasion
+            turn.need.category, turn.need.product_types = None, []
             if turn.need.purpose:
                 turn.ready_to_search, turn.question, turn.choices = True, None, []
             else:
@@ -481,19 +479,19 @@ class ElicitationAgentBuilder:
 
     @staticmethod
     def _settle_suggestion(state, turn: TurnUnderstanding) -> None:
-        """The suggested item can only be meant while one is open, and acting on it never starts a search."""
+        """The suggested item can only be meant while one is open and acting on it never starts a search."""
         if state_keys.suggestion(state) is None:
             turn.about_suggestion = False
         if turn.about_suggestion:
             turn.ready_to_search = False
             turn.question = None
-            if turn.intent in ("shop", "more_options", "other"):   # about the item, but not choose/ask/reject:
-                turn.intent = "see_suggestion"                     # show it with a few like it
+            if turn.intent in ("shop", "more_options", "other"):   
+                turn.intent = "see_suggestion"                    
 
     def _grounded_avoid(self, state, turn: TurnUnderstanding, message: str) -> list[str]:
         """Things to avoid hide products, so each one must come from the shopper: their words now (or their
-        reason for rejecting), their saved profile, or an earlier turn. The model sometimes fills `avoid`
-        with features of products it just showed ("denim" for jeans!), which would hide good matches."""
+        reason for rejecting), their saved profile or an earlier turn. The model sometimes fills `avoid`
+        with features of products it just showed ("denim" for jeans!) which would hide good matches."""
         previous = {t.lower() for t in state_keys.need(state).avoid}
         profile = {p.value.lower() for p in state_keys.profile(state).preferences if p.polarity == "avoid"}
         said = word_stems(f"{message} {turn.reason or ''}")
@@ -533,7 +531,7 @@ class ElicitationAgentBuilder:
             try:
                 products = self._catalog.search(SearchQuery(text="", category=category, limit=50))
                 self._genders_by_category[category] = {p.gender for p in products if p.gender}
-            except Exception as error:   # a failed lookup must never block the conversation
+            except Exception as error:   
                 logger.warning("Could not read genders for %s: %s", category, error)
                 return set()
         return self._genders_by_category[category]
@@ -630,7 +628,7 @@ def _presented_products(state) -> str:
     focus = state_keys.focus(state)
     lines = []
     for number, product in enumerate(state_keys.presented(state), start=1):
-        facts = [a.value for a in product.attributes if len(a.value) <= 25][:2]   # short, distinguishing facts
+        facts = [a.value for a in product.attributes if len(a.value) <= 25][:2]
         if product.price is not None:
             facts.append(f"${product.price:.0f}")
         title = " ".join(product.title.split()[:10])

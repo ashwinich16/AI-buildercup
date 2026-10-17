@@ -82,11 +82,7 @@ WARDROBE_JUST_ADDED = "wardrobe_just_added"  # ids of pieces added from photos s
 # Kept by ADK across this shopper's sessions (in memory); moves to BigQuery with the analytics work
 REQUESTED_CATEGORIES = "user:requested_categories"  # categories they asked for that the catalog lacks
 
-
-# ---------------------------------------------------------------------
 # Typed readers (any mapping with .get: session state, ADK context state)
-# ---------------------------------------------------------------------
-
 def need(state) -> ShoppingNeed:
     return ShoppingNeed.model_validate(state.get(NEED) or {})
 

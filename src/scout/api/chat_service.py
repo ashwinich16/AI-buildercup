@@ -58,18 +58,17 @@ class ProductCard(BaseModel):
     image_url: Optional[str] = None
     summary: str = ""
     exact_match: bool = True
-    evidence: list[EvidenceView] = Field(default_factory=list)   # review quotes that back this option
-
+    evidence: list[EvidenceView] = Field(default_factory=list)  
 
 class ProductFact(BaseModel):
-    name: str                                              # e.g. "colour"
-    value: str                                             # e.g. "navy blue"
+    name: str                                              
+    value: str                                             
 
 
 class ReviewPointView(BaseModel):
-    aspect: str                                            # e.g. "fit"
-    finding: str                                           # e.g. "runs a size small"
-    count: str = ""                                        # e.g. "7 of 20 reviews"
+    aspect: str                                           
+    finding: str                                           
+    count: str = ""                                        
     heads_up: bool = False
 
 
@@ -217,7 +216,7 @@ class ScoutChatService:
             memory.preferred_name = preferred_name
         if seed_preferences and not returning:
             memory.preferences = PreferenceProfile().merge(seed_preferences, [])
-        if renamed or not returning:        # saved only when something changed: every query is time at the door
+        if renamed or not returning:        
             await asyncio.to_thread(self._shoppers.save, user_id, memory)
 
         name = memory.preferred_name or display_name
@@ -229,7 +228,7 @@ class ScoutChatService:
 
         session = await self._sessions.create_session(app_name=APP_NAME, user_id=user_id,
                                                       state=_state_from_memory(memory))
-        await self._keep_conversation(user_id, session)   # can carry on even if this server restarts now
+        await self._keep_conversation(user_id, session)   
         greeting = _greeting(name, returning, memory.cart)
         return StartedSession(session_id=session.id, greeting=greeting, shopper_name=name,
                               **_screen_from_state(session.state).model_dump())
@@ -239,7 +238,7 @@ class ScoutChatService:
         try:
             session_id = await asyncio.to_thread(self._conversations.latest_conversation, user_id)
             session = await self._get(user_id, session_id, memory) if session_id else None
-        except Exception:                   # can't reach it: a new conversation is always fine
+        except Exception:                   
             logger.exception("Could not load the last conversation for shopper %s", user_id)
             return None
         return session if session is not None and state_keys.conversation(session.state) else None
@@ -257,7 +256,7 @@ class ScoutChatService:
         message = types.Content(role="user", parts=[types.Part(text=text)])
         streaming = RunConfig(streaming_mode=StreamingMode.SSE)
         replies: list[str] = []
-        streamed = False          # pieces of the current message were already sent
+        streamed = False          
         async for event in self._runner.run_async(user_id=user_id, session_id=session_id,
                                                   new_message=message, run_config=streaming):
             raw = content_text(event.content)
@@ -267,12 +266,12 @@ class ScoutChatService:
                 piece = _FORMATTING.sub("", raw)
                 if piece:
                     if not streamed and replies:
-                        piece = "\n\n" + piece.lstrip()    # a second message in the same turn
+                        piece = "\n\n" + piece.lstrip()   
                     streamed = True
                     yield {"type": "delta", "text": piece}
                 continue
             whole = _FORMATTING.sub("", raw).strip()
-            if not streamed and whole:                     # said in one go (e.g. a question): send it now
+            if not streamed and whole:                     
                 yield {"type": "delta", "text": ("\n\n" if replies else "") + whole}
             if whole:
                 replies.append(whole)
@@ -283,9 +282,9 @@ class ScoutChatService:
 
         session = await self._get(user_id, session_id)
         await self._remember(user_id, before, _memory_from_state(session.state))
-        self._keep_conversation_later(user_id, session)   # never makes the shopper wait
+        self._keep_conversation_later(user_id, session)  
         if session.state.get(state_keys.TASTE_EVIDENCE) or session.state.get(state_keys.PREFERENCE_PENDING):
-            self._in_background(self._learn(user_id, session_id))   # nor does learning from it
+            self._in_background(self._learn(user_id, session_id))  
         turn = read_turn(session.state)
         action = _ACTIONS.get(turn.intent) if turn else None
         reply = "\n\n".join(replies)
@@ -295,7 +294,7 @@ class ScoutChatService:
         choices = turn.choices if turn and turn.question and not turn.ready_to_search else []
         choose_one = bool(session.state.get(state_keys.PENDING_SIZE) or session.state.get(state_keys.PENDING_WHERE)
                           or session.state.get(state_keys.CONFIRM_SIZES))
-        if session.state.get(state_keys.PENDING_SIZE):                 # waiting for a size: the sizes, to tap
+        if session.state.get(state_keys.PENDING_SIZE):               
             choices = list(session.state.get(state_keys.SIZE_CHOICES) or [])
         done = ChatTurn(reply=reply, action=action, choices=choices, choose_one=choose_one,
                         **_screen_from_state(session.state).model_dump())
@@ -303,7 +302,7 @@ class ScoutChatService:
 
     async def end_session(self, user_id: str, session_id: str) -> None:
         """Forget this conversation (the shopper cleared it). What Scout remembers about them is kept."""
-        await self._get(user_id, session_id)            # only their own conversation
+        await self._get(user_id, session_id)           
         await self._sessions.delete_session(app_name=APP_NAME, user_id=user_id, session_id=session_id)
         await asyncio.to_thread(self._conversations.delete_conversation, user_id, session_id)
 
@@ -384,7 +383,7 @@ class ScoutChatService:
         shown = [i for i in [*(session.state.get(state_keys.WARDROBE_JUST_ADDED) or []), *(just_added or [])]
                  if i in kept]
         taste = before.taste.model_copy(deep=True)
-        for piece_traits, made_for in traits or []:          # each new piece counted once, as it is added
+        for piece_traits, made_for in traits or []:          
             taste.learn(piece_traits, made_for, "owned")
         delta = {state_keys.WARDROBE: [item.model_dump() for item in wardrobe],
                  state_keys.WARDROBE_JUST_ADDED: shown, state_keys.TASTE: taste.model_dump()}
@@ -412,10 +411,10 @@ class ScoutChatService:
             taste_before = {mark.value for mark in state_keys.taste(known).marks}
             for item in pending:
                 known = await self._run_learner(user_id, known, item)
-            session = await self._get(user_id, session_id)          # the latest, after learning
+            session = await self._get(user_id, session_id)          
             before = _memory_from_state(session.state)
             taste = before.taste.model_copy(deep=True)
-            taste.forget(sorted(taste_before - {mark.value for mark in state_keys.taste(known).marks}))   # "forget navy"
+            taste.forget(sorted(taste_before - {mark.value for mark in state_keys.taste(known).marks}))  
             preferences = state_keys.profile(known)
             left = [p for p in session.state.get(state_keys.PREFERENCE_PENDING) or [] if p not in pending]
             delta = {state_keys.PREFERENCES: preferences.model_dump(), state_keys.TASTE: taste.model_dump(),
@@ -451,7 +450,7 @@ class ScoutChatService:
                 return
             known = sorted({mark.value for mark in state_keys.taste(session.state).marks})
             traits = await asyncio.to_thread(self._taste_reader.read, [q["text"] for q in queued], known)
-            session = await self._get(user_id, session_id)          # the latest, after the read
+            session = await self._get(user_id, session_id)         
             before = _memory_from_state(session.state)
             taste = before.taste.model_copy(deep=True)
             for item, item_traits in zip(queued, traits):
@@ -465,7 +464,7 @@ class ScoutChatService:
 
     def _in_background(self, work) -> None:
         task = asyncio.create_task(work)
-        self._saving.add(task)                       # keep a reference until it is done
+        self._saving.add(task)                       
         task.add_done_callback(self._saving.discard)
 
     async def _get(self, user_id: str, session_id: str, memory: Optional[ShopperMemory] = None):
@@ -477,12 +476,12 @@ class ScoutChatService:
         summary = await asyncio.to_thread(self._conversations.load_conversation, user_id, session_id)
         if summary is None:
             raise LookupError("Conversation not found")
-        if memory is None:                   # always the latest cart and wardrobe
+        if memory is None:                 
             memory = await asyncio.to_thread(self._shoppers.load, user_id)
         try:
             return await self._sessions.create_session(app_name=APP_NAME, user_id=user_id, session_id=session_id,
                                                        state={**summary, **_state_from_memory(memory)})
-        except Exception:      # rebuilt by another request at the same moment: use that one
+        except Exception:      
             session = await self._sessions.get_session(app_name=APP_NAME, user_id=user_id, session_id=session_id)
             if session is None:
                 raise
@@ -492,7 +491,7 @@ class ScoutChatService:
         """Save the conversation in the background, so the turn ends without waiting for the database.
         The summary is taken now, so it is exactly this turn's."""
         task = asyncio.create_task(self._save_summary(user_id, session.id, _summary(session.state)))
-        self._saving.add(task)                       # keep a reference until it is done
+        self._saving.add(task)                       
         task.add_done_callback(self._saving.discard)
 
     async def _keep_conversation(self, user_id: str, session) -> None:
@@ -564,7 +563,7 @@ def _history(state: dict) -> list[ChatMessage]:
     for turn in state_keys.conversation(state):
         messages.append(ChatMessage(role="shopper", text=turn.get("shopper", "")))
         reply = _FORMATTING.sub("", turn.get("scout", "")).strip()
-        if reply:                              # a pause has no reply
+        if reply:                              
             messages.append(ChatMessage(role="scout", text=reply))
     return [m for m in messages if m.text]
 
@@ -586,7 +585,7 @@ _TWO_WAYS = ("Shall we plan an outfit together, using the clothes you already ow
 
 
 # Formatting a model may still add (bold/italic asterisks, headings, code marks, bullet dashes).
-# Replies are spoken aloud, so these would be read out as symbols.
+# Replies are spoken aloud so these would be read out as symbols.
 _FORMATTING = re.compile(r"[*#`_>]+|^[ \t]*[-•][ \t]+", re.MULTILINE)
 
 

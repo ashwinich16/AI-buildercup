@@ -37,7 +37,7 @@ class ReviewPoint(BaseModel):
     sentiment: Optional[str] = None       # positive / negative / mixed
     mentions: Optional[int] = None        # Gemini's estimate (older data)
     supporting_reviews: Optional[int] = None   # counted from the reviews that say it (review_evidence.py)
-    quotes: list[str] = Field(default_factory=list)   # word-for-word snippets, checked against the reviews
+    quotes: list[str] = Field(default_factory=list)   # word-for-word snippets checked against the reviews
 
     def count(self) -> Optional[int]:
         return self.supporting_reviews if self.supporting_reviews is not None else self.mentions
@@ -48,8 +48,8 @@ class Product(BaseModel):
     id: str
     title: str
     category: Optional[str] = None
-    product_type: Optional[str] = None    # the kind within the category (from the catalog's own list)
-    gender: Optional[str] = None          # who it is made for: "men", "women" or "unisex"
+    product_type: Optional[str] = None   
+    gender: Optional[str] = None         
     brand: Optional[str] = None
     price: Optional[float] = None
     rating: Optional[float] = None
@@ -69,13 +69,13 @@ class Product(BaseModel):
     review_summary: Optional[str] = None
     review_points: list[ReviewPoint] = Field(default_factory=list)
     review_excerpts: list[str] = Field(default_factory=list)
-    reviews_analyzed: Optional[int] = None     # how many reviews the review points were drawn from
+    reviews_analyzed: Optional[int] = None     
 
     # Anything else from the source data
     extra: dict[str, Any] = Field(default_factory=dict)
 
-    SHORT_TEXT_CHARS: ClassVar[int] = 300          # cap for seller text used as a fallback summary
-    SHORT_FINDINGS_PER_ASPECT: ClassVar[int] = 3   # review findings per aspect in the compact prompt
+    SHORT_TEXT_CHARS: ClassVar[int] = 300          
+    SHORT_FINDINGS_PER_ASPECT: ClassVar[int] = 3   
 
     @property
     def kind(self) -> str:
